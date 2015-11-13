@@ -11757,16 +11757,6 @@ bool ReplicatedPG::agent_maybe_flush(ObjectContextRef& obc)
   return true;
 }
 
-struct C_AgentEvictStartStop : public Context {
-  ReplicatedPGRef pg;
-  explicit C_AgentEvictStartStop(ReplicatedPG *p) : pg(p) {
-    pg->osd->agent_start_evict_op();
-  }
-  void finish(int r) {
-    pg->osd->agent_finish_evict_op();
-  }
-};
-
 bool ReplicatedPG::agent_maybe_evict(ObjectContextRef& obc, bool after_flush)
 {
   const hobject_t& soid = obc->obs.oi.soid;
@@ -11829,8 +11819,13 @@ bool ReplicatedPG::agent_maybe_evict(ObjectContextRef& obc, bool after_flush)
 
   dout(10) << __func__ << " evicting " << obc->obs.oi << dendl;
   OpContextUPtr ctx = simple_opc_create(obc);
-  Context *on_evict = new C_AgentEvictStartStop(this);
-  ctx->on_finish = on_evict;
+
+  osd->agent_start_evict_op();
+  ctx->register_on_complete(
+    [this]() {
+      osd->agent_finish_evict_op();
+    });
+
   ctx->lock_to_release = OpContext::W_LOCK;
   ctx->at_version = get_next_version();
   assert(ctx->new_obs.exists);
