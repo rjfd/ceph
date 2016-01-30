@@ -106,7 +106,6 @@ struct shard_info_t : err_t {
   uint32_t omap_digest = 0;
   bool data_digest_present = false;
   uint32_t data_digest = 0;
-  uint64_t errors = 0;
 };
 
 struct inconsistent_obj_t : err_t {
@@ -117,6 +116,48 @@ struct inconsistent_obj_t : err_t {
   object_id_t object;
   // osd => shard_info
   std::map<int32_t, shard_info_t> shards;
+};
+
+struct inconsistent_snapset_t {
+  inconsistent_snapset_t() = default;
+  inconsistent_snapset_t(const object_id_t& head)
+    : object{head}
+  {}
+  enum {
+    ATTR_MISSING   = 1 << 0,
+    ATTR_CORRUPTED = 1 << 1,
+    CLONE_MISSING  = 1 << 2,
+    SNAP_MISMATCH  = 1 << 3,
+    HEAD_MISMATCH  = 1 << 4,
+    HEADLESS_CLONE = 1 << 5,
+    SIZE_MISMATCH  = 1 << 6,
+  };
+  uint64_t errors = 0;
+  object_id_t object;
+  std::vector<snap_t> clones;
+  std::vector<snap_t> missing;
+
+  bool ss_attr_missing() const {
+    return errors & ATTR_MISSING;
+  }
+  bool ss_attr_corrupted() const {
+    return errors & ATTR_CORRUPTED;
+  }
+  bool clone_missing() const  {
+    return errors & CLONE_MISSING;
+  }
+  bool snapset_mismatch() const {
+    return errors & SNAP_MISMATCH;
+  }
+  bool head_mismatch() const {
+    return errors & HEAD_MISMATCH;
+  }
+  bool headless() const {
+    return errors & HEADLESS_CLONE;
+  }
+  bool size_mismatch() const {
+    return errors & SIZE_MISMATCH;
+  }
 };
 
 /**
