@@ -25,6 +25,13 @@ void Store::add_object_error(int64_t pool, const inconsistent_obj_wrapper& e)
   results[Scrub::to_object_key(pool, e.object)] = bl;
 }
 
+void Store::add_snap_error(int64_t pool, const inconsistent_snapset_wrapper& e)
+{
+  bufferlist bl;
+  e.encode(bl);
+  results[to_snap_key(pool, e.object)] = bl;
+}
+
 bool Store::empty() const
 {
   return results.empty();
@@ -43,5 +50,11 @@ string to_object_key(int64_t pool, const librados::object_id_t& oid)
 	  std::to_string(pool) + "." +
 	  oid.name + oid.nspace + std::to_string(oid.snap));
 }
+
+string to_snap_key(int64_t pool, const librados::object_id_t& oid)
+{
+  return "SCRUB_SS_" + std::to_string(pool) + "." + oid.name + oid.nspace;
+}
+
 
 } // namespace Scrub
