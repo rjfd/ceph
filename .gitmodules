@@ -26,3 +26,8 @@
 [submodule "src/spdk"]
 	path = src/spdk
 	url = https://github.com/ceph/spdk.git
+[submodule "src/lua"]
+	path = src/lua
+	url = https://github.com/ceph/lua.git
+	branch = lua-5.3-ceph
+	ignore = dirty
