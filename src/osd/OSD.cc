@@ -5214,8 +5214,11 @@ void OSD::do_command(Connection *con, ceph_tid_t tid, vector<string>& cmd, buffe
 	  if (prefix != "pg")
 	    cmd_putval(cct, cmdmap, "cmd", prefix);
 	  r = pg->do_command(cmdmap, ss, data, odata, con, tid);
-	  if (r == -EAGAIN)
-	    goto out_skip_reply;
+	  if (r == -EAGAIN) {
+	    pg->unlock();
+	    // don't reply, pg will do so async
+	    return;
+	  }
 	} else {
 	  ss << "not primary for pgid " << pgid;
 
@@ -5515,8 +5518,6 @@ void OSD::do_command(Connection *con, ceph_tid_t tid, vector<string>& cmd, buffe
     reply->set_data(odata);
     con->send_message(reply);
   }
- out_skip_reply:
-  return;
 }
 
 
