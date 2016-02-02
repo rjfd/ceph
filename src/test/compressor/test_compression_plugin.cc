@@ -17,6 +17,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <string.h>
 #include <gtest/gtest.h>
 #include "global/global_init.h"
 #include "compressor/CompressionPlugin.h"
@@ -26,7 +27,7 @@
 
 TEST(CompressionPlugin, all)
 {
-  string directory(".libs");
+  string directory = getenv("CEPH_LIB");
   CompressorRef compressor;
   PluginRegistry *reg = g_ceph_context->get_plugin_registry();
   EXPECT_TRUE(reg);
@@ -52,9 +53,14 @@ int main(int argc, char **argv) {
   global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_UTILITY, 0);
   common_init_finish(g_ceph_context);
 
-  system("mkdir -p .libs/compressor");
-  system("cp .libs/libceph_example.so* .libs/compressor/");
-  g_conf->set_val("plugin_dir", ".libs", false, false);
+  string directory = getenv("CEPH_LIB");
+  string mkdir_compressor = "mkdir -p " + directory + "/compressor";
+  system(mkdir_compressor.c_str());
+
+  string cp_libceph_example = "cp " + directory + "/libceph_example.so* " + directory + "/compressor/";
+  system(cp_libceph_example.c_str());
+
+  g_conf->set_val("plugin_dir", directory, false, false);
 
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
