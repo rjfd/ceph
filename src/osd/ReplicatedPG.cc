@@ -8520,9 +8520,10 @@ void ReplicatedPG::submit_log_entries(
     }
   }
   if (get_osdmap()->test_flag(CEPH_OSDMAP_REQUIRE_JEWEL)) {
+    ceph_tid_t rep_tid = repop->rep_tid;
     log_entry_update_waiting_on.insert(
       make_pair(
-	repop->rep_tid,
+	rep_tid,
 	LogUpdateCtx{std::move(repop), std::move(waiting_on)}
 	));
   } else {
