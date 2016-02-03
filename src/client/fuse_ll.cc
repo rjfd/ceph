@@ -85,6 +85,7 @@ public:
   struct fuse_chan *ch;
   struct fuse_session *se;
   char *mountpoint;
+  int mountpoint_fd;
 
   Mutex stag_lock;
   int last_stag;
@@ -328,11 +329,24 @@ static void fuse_ll_mkdir(fuse_req_t req, fuse_ino_t parent, const char *name,
 {
   CephFuse::Handle *cfuse = fuse_ll_req_prepare(req);
   const struct fuse_ctx *ctx = fuse_req_ctx(req);
-  Inode *i2, *i1 = cfuse->iget(parent);
+  Inode *i2, *i1;
   struct fuse_entry_param fe;
 
   memset(&fe, 0, sizeof(fe));
 
+#ifdef HAVE_SYS_SYNCFS
+  if (cfuse->fino_snap(parent) == CEPH_SNAPDIR &&
+      cfuse->client->cct->_conf->fuse_multithreaded &&
+      cfuse->client->cct->_conf->fuse_syncfs_on_mksnap) {
+    int r = ::syncfs(cfuse->mountpoint_fd);
+    if (r < 0) {
+      fuse_reply_err(req, -errno);
+      return;
+    }
+  }
+#endif
+
+  i1 = cfuse->iget(parent);
   int r = cfuse->client->ll_mkdir(i1, name, mode, &fe.attr, &i2, ctx->uid,
 				  ctx->gid);
   if (r == 0) {
@@ -909,6 +923,7 @@ CephFuse::Handle::Handle(Client *c, int fd) :
   ch(NULL),
   se(NULL),
   mountpoint(NULL),
+  mountpoint_fd(-1),
   stag_lock("fuse_ll.cc stag_lock"),
   last_stag(0)
 {
@@ -932,6 +947,8 @@ void CephFuse::Handle::finalize()
     fuse_session_destroy(se);
   if (ch)
     fuse_unmount(mountpoint, ch);
+  if (mountpoint_fd >= 0)
+    ::close(mountpoint_fd);
 
   pthread_key_delete(fuse_req_key);
 }
@@ -988,6 +1005,10 @@ int CephFuse::Handle::init(int argc, const char *argv[])
     free(newargv);
     return EINVAL;
   }
+
+  mountpoint_fd = ::open(mountpoint, O_RDONLY | O_DIRECTORY);
+  if (mountpoint_fd < 0)
+    return errno;
 
   assert(args.allocated);  // Checking fuse has realloc'd args so we can free newargv
   free(newargv);
