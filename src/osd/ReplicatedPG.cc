@@ -8480,10 +8480,10 @@ void ReplicatedPG::submit_log_entries(
   dout(10) << __func__ << entries << dendl;
   assert(is_primary());
 
-  unique_ptr<ObjectStore::Transaction> t(
-    new ObjectStore::Transaction);
+  ObjectStore::Transaction t;
+
   eversion_t old_last_update = info.last_update;
-  merge_new_log_entries(entries, *t);
+  merge_new_log_entries(entries, t);
 
   boost::intrusive_ptr<RepGather> repop;
   set<pg_shard_t> waiting_on;
@@ -8500,12 +8500,13 @@ void ReplicatedPG::submit_log_entries(
     assert(peer_missing.count(peer));
     assert(peer_info.count(peer));
     if (get_osdmap()->test_flag(CEPH_OSDMAP_REQUIRE_JEWEL)) {
+      assert(repop);
       MOSDPGUpdateLogMissing *m = new MOSDPGUpdateLogMissing(
 	entries,
 	spg_t(info.pgid.pgid, i->shard),
 	pg_whoami.shard,
 	get_osdmap()->get_epoch(),
-	ceph_tid_t());
+	repop->rep_tid);
       osd->send_message_osd_cluster(
 	peer.osd, m, get_osdmap()->get_epoch());
       waiting_on.insert(peer);
@@ -8521,26 +8522,68 @@ void ReplicatedPG::submit_log_entries(
   }
   if (get_osdmap()->test_flag(CEPH_OSDMAP_REQUIRE_JEWEL)) {
     ceph_tid_t rep_tid = repop->rep_tid;
+    waiting_on.insert(pg_whoami);
     log_entry_update_waiting_on.insert(
       make_pair(
 	rep_tid,
 	LogUpdateCtx{std::move(repop), std::move(waiting_on)}
 	));
+    struct OnComplete : public Context {
+      ReplicatedPGRef pg;
+      ceph_tid_t rep_tid;
+      epoch_t epoch;
+      OnComplete(
+	ReplicatedPGRef pg,
+	ceph_tid_t rep_tid,
+	epoch_t epoch)
+	: pg(pg), rep_tid(rep_tid), epoch(epoch) {}
+      void finish(int) override {
+	pg->lock();
+	if (!pg->pg_has_reset_since(epoch)) {
+	  auto it = pg->log_entry_update_waiting_on.find(rep_tid);
+	  assert(it != pg->log_entry_update_waiting_on.end());
+	  auto it2 = it->second.waiting_on.find(pg->pg_whoami);
+	  assert(it2 != it->second.waiting_on.end());
+	  it->second.waiting_on.erase(it2);
+	  if (it->second.waiting_on.empty()) {
+	    pg->repop_all_applied(it->second.repop.get());
+	    pg->repop_all_committed(it->second.repop.get());
+	    pg->log_entry_update_waiting_on.erase(it);
+	  }
+	}
+	pg->unlock();
+      }
+    };
+    t.register_on_complete(
+      new OnComplete{this, rep_tid, get_osdmap()->get_epoch()});
   } else {
     if (on_complete) {
       struct OnComplete : public Context {
+	ReplicatedPGRef pg;
 	std::function<void(void)> on_complete;
+	epoch_t epoch;
 	OnComplete(
-	  std::function<void(void)> &&on_complete)
-	  : on_complete(std::move(on_complete)) {}
+	  ReplicatedPGRef pg,
+	  std::function<void(void)> &&on_complete,
+	  epoch_t epoch)
+	  : pg(pg),
+	    on_complete(std::move(on_complete)),
+	    epoch(epoch) {}
 	void finish(int) override {
-	  on_complete();
+	  pg->lock();
+	  if (!pg->pg_has_reset_since(epoch))
+	    on_complete();
+	  pg->unlock();
 	}
       };
-      t->register_on_complete(
-	new OnComplete{std::move(*on_complete)});
+      t.register_on_complete(
+	new OnComplete{
+	  this, std::move(*on_complete), get_osdmap()->get_epoch()
+	  });
     }
   }
+  int r = osd->store->queue_transaction(osr.get(), std::move(t), NULL);
+  assert(r == 0);
 }
 
 // -------------------------------------------------------
