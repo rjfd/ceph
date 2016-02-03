@@ -653,6 +653,7 @@ set(libos_srcs
   os/bluestore/BlueStore.cc
   os/bluestore/bluestore_types.cc
   os/bluestore/FreelistManager.cc
+  os/bluestore/KernelDevice.cc
   os/bluestore/StupidAllocator.cc
   os/fs/FS.cc
   ${libos_xfs_srcs})
@@ -660,6 +661,10 @@ if(${HAVE_LIBFUSE})
   list(APPEND libos_srcs
     os/FuseStore.cc)
 endif(${HAVE_LIBFUSE})
+if(HAVE_SPDK)
+  list(APPEND libos_srcs
+    os/bluestore/NVMEDevice.cc)
+endif(HAVE_SPDK)
 
 # make rocksdb statically
 add_custom_target(build_rocksdb
@@ -686,6 +691,12 @@ endif(${WITH_LTTNG})
 if(${HAVE_LIBFUSE})
   target_link_libraries(os ${FUSE_LIBRARIES})
 endif(${HAVE_LIBFUSE})
+if(HAVE_SPDK)
+  target_link_libraries(os spdk dpdk pciaccess)
+  # TODO: new versions of cmake will set the include dir properly, hence it is not necessary
+  # to add these pathes manually.
+  target_include_directories(os PUBLIC ${SPDK_INCLUDE_DIRS})
+endif(HAVE_SPDK)
 target_link_libraries(os kv)
 
 set(cls_references_files objclass/class_api.cc)

@@ -138,6 +138,27 @@ find_package(xfs)
 set(HAVE_XFS ${XFS_FOUND})
 endif(${WITH_XFS})
 
+option(WITH_SPDK "Enable SPDK" OFF)
+if(WITH_SPDK)
+  # TODO: should use add_library(spdk INTERFACE IMPORTED) instead, if INTERFACE is supported
+  add_library(spdk STATIC IMPORTED)
+  add_library(dpdk STATIC IMPORTED)
+  add_library(pciaccess STATIC IMPORTED)
+  find_package(pciaccess REQUIRED)
+  find_package(dpdk REQUIRED)
+  find_package(spdk REQUIRED)
+  # TODO: use INTERFACE if supported
+  # set_property(TARGET spdk PROPERTY
+  #   INTERFACE_INCLUDE_DIRECTORIES ${DPDK_INCLUDE_DIR} ${SPDK_INCLUDE_DIR} ${PCIACCESS_INCLUDE_DIR})
+  # set_property(TARGET spdk PROPERTY
+  #   INTERFACE_LINK_LIBRARIES ${DPDK_LIBRARIES} ${SPDK_LIBRARIES} ${PCIACCESS_LIBRARIES})
+  set_property(TARGET spdk PROPERTY IMPORTED_LOCATION ${SPDK_LIBRARIES})
+  set_property(TARGET dpdk PROPERTY IMPORTED_LOCATION ${DPDK_LIBRARIES})
+  set_property(TARGET pciaccess PROPERTY IMPORTED_LOCATION ${PCIACCESS_LIBRARIES})
+  set(SPDK_INCLUDE_DIRS ${DPDK_INCLUDE_DIR} ${SPDK_INCLUDE_DIR} ${PCIACCESS_INCLUDE_DIR})
+  set(HAVE_SPDK ${SPDK_FOUND})
+endif(WITH_SPDK)
+
 find_package(blkid REQUIRED)
 set(HAVE_LIBBLKID ${BLKID_FOUND})
 
