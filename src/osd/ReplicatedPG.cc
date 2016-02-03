@@ -9572,6 +9572,7 @@ void ReplicatedPG::do_update_log_missing(OpRequestRef &op)
 	    pg_whoami.shard,
 	    msg->get_epoch(),
 	    msg->get_tid());
+	reply->set_priority(CEPH_MSG_PRIO_HIGH);
 	msg->get_connection()->send_message(reply);
       }));
   int tr = osd->store->queue_transaction(
