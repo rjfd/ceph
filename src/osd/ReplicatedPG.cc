@@ -9560,7 +9560,7 @@ void ReplicatedPG::do_update_log_missing(OpRequestRef &op)
   append_log_entries_update_missing(m->entries, t);
   // TODO FIX
 
-  t.register_on_complete(
+  t.register_on_commit(
     new FunctionContext(
       [=](int) {
 	MOSDPGUpdateLogMissing *msg =
