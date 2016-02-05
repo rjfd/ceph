@@ -64,7 +64,7 @@ endif(INTEL_SSE)
 if(INTEL_SSE4_1)
   add_library(ec_jerasure_sse4 SHARED ${jerasure_srcs})
   add_dependencies(ec_jerasure_sse4 ${CMAKE_SOURCE_DIR}/src/ceph_ver.h)
-  target_link_libraries(ec_jerasure_sse4 ${EXTRALIBS})
+  target_link_libraries(ec_jerasure_sse4 crush ${EXTRALIBS})
   set_target_properties(ec_jerasure_sse4 PROPERTIES VERSION 2.0.0 SOVERSION 2
     COMPILE_FLAGS ${SSE4_FLAGS})
   install(TARGETS ec_jerasure_sse4 DESTINATION lib/erasure-code)
