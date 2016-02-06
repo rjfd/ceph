@@ -71,6 +71,9 @@ Patch0:		init-ceph.in-fedora.patch
 #################################################################################
 # dependencies that apply across all distro families
 #################################################################################
+Requires:       ceph-osd = %{epoch}:%{version}-%{release}
+Requires:       ceph-mds = %{epoch}:%{version}-%{release}
+Requires:       ceph-mon = %{epoch}:%{version}-%{release}
 Requires:	librbd1 = %{epoch}:%{version}-%{release}
 Requires:	librados2 = %{epoch}:%{version}-%{release}
 Requires:	libcephfs1 = %{epoch}:%{version}-%{release}
@@ -222,15 +225,6 @@ on commodity hardware and delivers object, block and file system storage.
 #################################################################################
 # packages
 #################################################################################
-%package ceph
-Summary:       Ceph Meta Package
-Group:         System Environment/Base
-Requires:      ceph-osd = %{epoch}:%{version}-%{release}
-Requires:      ceph-mds = %{epoch}:%{version}-%{release}
-Requires:      ceph-mon = %{epoch}:%{version}-%{release}
-%description ceph
-Ceph is the meta package that includes all the daemons and ceph-common
-
 %package base
 Summary:       Ceph Base Package
 Group:         System Environment/Base
