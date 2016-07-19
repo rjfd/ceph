@@ -775,7 +775,9 @@ int librados::IoCtxImpl::aio_operate(const object_t& oid,
   Objecter::Op *op = objecter->prepare_mutate_op(
     oid, oloc, *o, snap_context, ut, flags, onack,
     oncommit, &c->objver);
+  ldout(client->cct, 10) << __func__ << ": call objecter->op_submit" << dendl;
   objecter->op_submit(op, &c->tid);
+  ldout(client->cct, 10) << __func__ << ": endc objectter->op_submit" << dendl;
 
   return 0;
 }

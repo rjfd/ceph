@@ -279,6 +279,8 @@ void AbstractAioImageWrite::send_request() {
       journal_tid = append_journal_event(requests, m_synchronous);
     }
 
+    ldout(cct, 20) << __func__ << ": journal_tid=" << journal_tid << dendl;
+
     if (m_image_ctx.object_cacher != NULL) {
       send_cache_requests(object_extents, journal_tid);
     }

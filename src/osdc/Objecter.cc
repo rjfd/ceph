@@ -2161,7 +2161,9 @@ void Objecter::op_submit(Op *op, ceph_tid_t *ptid, int *ctx_budget)
   ceph_tid_t tid = 0;
   if (!ptid)
     ptid = &tid;
+  ldout(cct, 10) << __func__ << ": call _op_submit_with_budget" << dendl;
   _op_submit_with_budget(op, rl, ptid, ctx_budget);
+  ldout(cct, 10) << __func__ << ": endc _op_submit_with_budget" << dendl;
 }
 
 void Objecter::_op_submit_with_budget(Op *op, shunique_lock& sul,
@@ -2194,7 +2196,9 @@ void Objecter::_op_submit_with_budget(Op *op, shunique_lock& sul,
 				      op_cancel(tid, -ETIMEDOUT); });
   }
 
+  ldout(cct, 10) << __func__ << ": call _op_submit" << dendl;
   _op_submit(op, sul, ptid);
+  ldout(cct, 10) << __func__ << ": endc _op_submit" << dendl;
 }
 
 void Objecter::_send_op_account(Op *op)
@@ -2308,7 +2312,9 @@ void Objecter::_op_submit(Op *op, shunique_lock& sul, ceph_tid_t *ptid)
     sul.lock();
   }
 
+  ldout(cct, 10) << __func__ << ": call _send_op_account" << dendl;
   _send_op_account(op);
+  ldout(cct, 10) << __func__ << ": endc _send_op_account" << dendl;
 
   // send?
 

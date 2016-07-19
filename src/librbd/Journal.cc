@@ -145,7 +145,7 @@ struct C_DecodeTags : public Context {
 class ThreadPoolSingleton : public ThreadPool {
 public:
   explicit ThreadPoolSingleton(CephContext *cct)
-    : ThreadPool(cct, "librbd::Journal", "tp_librbd_journ", 1) {
+    : ThreadPool(cct, "librbd::Journal", "tp_librbd_journ", 16) {
     start();
   }
   virtual ~ThreadPoolSingleton() {
@@ -892,10 +892,14 @@ uint64_t Journal<I>::append_io_events(journal::EventType event_type,
   assert(m_image_ctx.owner_lock.is_locked());
   assert(!bufferlists.empty());
 
+  CephContext *cct = m_image_ctx.cct;
+
   Futures futures;
   uint64_t tid;
   {
+    ldout(cct, 5) << __func__ << ": Acquiring m_lock" << dendl;
     Mutex::Locker locker(m_lock);
+    ldout(cct, 5) << __func__ << ": Acquired m_lock" << dendl;
     assert(m_state == STATE_READY);
 
     Mutex::Locker event_locker(m_event_lock);
@@ -909,7 +913,6 @@ uint64_t Journal<I>::append_io_events(journal::EventType event_type,
     m_events[tid] = Event(futures, requests, offset, length);
   }
 
-  CephContext *cct = m_image_ctx.cct;
   ldout(cct, 20) << this << " " << __func__ << ": "
                  << "event=" << event_type << ", "
                  << "new_reqs=" << requests.size() << ", "

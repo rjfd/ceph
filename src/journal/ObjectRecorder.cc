@@ -334,7 +334,10 @@ void ObjectRecorder::send_appends(AppendBuffers *append_buffers) {
   librados::AioCompletion *rados_completion =
     librados::Rados::aio_create_completion(append_flush, NULL,
                                            utils::rados_ctx_callback);
+  ldout(m_cct, 20) << __func__ << ": start aio_operate tid=" << append_tid << dendl;
   int r = m_ioctx.aio_operate(m_oid, rados_completion, &op);
+  ldout(m_cct, 20) << __func__ << ": finish aio_operate tid=" << append_tid << dendl;
+
   assert(r == 0);
   rados_completion->release();
 }

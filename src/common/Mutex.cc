@@ -21,6 +21,15 @@
 #include "include/utime.h"
 #include "common/Clock.h"
 #include "common/valgrind.h"
+#include <chrono>
+#include "common/dout.h"
+
+#define dout_subsys ceph_subsys_rbd
+
+typedef std::chrono::high_resolution_clock _clock;
+typedef std::chrono::time_point<_clock> _time;
+typedef std::chrono::microseconds _mili;
+using std::chrono::duration_cast;
 
 Mutex::Mutex(const std::string &n, bool r, bool ld,
 	     bool bt,
@@ -92,6 +101,11 @@ Mutex::~Mutex() {
 void Mutex::Lock(bool no_lockdep) {
   int r;
 
+  _time end_time;
+  _time begin_time = _clock::now();
+  if (g_ceph_context != nullptr)
+    ldout(g_ceph_context, 5) << "[" << name << "] Acquiring Lock" << dendl;
+
   if (lockdep && g_lockdep && !no_lockdep) _will_lock();
 
   if (logger && cct && cct->_conf->mutex_perf_counter) {
@@ -110,15 +124,21 @@ void Mutex::Lock(bool no_lockdep) {
     r = pthread_mutex_lock(&_m);
   }
 
+  end_time = _clock::now();
+
   assert(r == 0);
   if (lockdep && g_lockdep) _locked();
   _post_lock();
 
+  if (g_ceph_context != nullptr)
+    ldout(g_ceph_context, 5) << "[" << name  << "] Acquired Lock " << duration_cast<_mili>(end_time - begin_time).count() << dendl;
 out:
   ;
 }
 
 void Mutex::Unlock() {
+  if (g_ceph_context != nullptr)
+    ldout(g_ceph_context, 5) << "[" << name  << "] Release Lock" << dendl;
   _pre_unlock();
   if (lockdep && g_lockdep) _will_unlock();
   int r = pthread_mutex_unlock(&_m);
