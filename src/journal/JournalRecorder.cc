@@ -80,18 +80,23 @@ Future JournalRecorder::append(uint64_t tag_tid,
                                const bufferlist &payload_bl) {
 
 
+  m_lock.Lock();
   uint64_t entry_tid = m_journal_metadata->allocate_entry_tid(tag_tid);
   uint8_t splay_width = m_journal_metadata->get_splay_width();
   uint8_t splay_offset = entry_tid % splay_width;
 
-  Mutex::Locker l(m_object_ptrs[splay_offset].m_lock);
   ObjectRecorderHolder& object_holder = get_object(splay_offset);
-
   uint64_t commit_tid = m_journal_metadata->allocate_commit_tid(
     object_holder.object_ptr->get_object_number(), tag_tid, entry_tid);
   FutureImplPtr future(new FutureImpl(tag_tid, entry_tid, commit_tid));
   future->init(m_prev_future);
   m_prev_future = future;
+
+  object_holder.m_lock.Lock();
+  m_lock.Unlock();
+
+  //ldout(m_cct, 2) << "splay_offset=" << (int)splay_offset << " tag_tid=" << tag_tid << " entry_tid=" << entry_tid
+  //                << " commit_tid=" << commit_tid << dendl;
 
   bufferlist entry_bl;
   ::encode(Entry(future->get_tag_tid(), future->get_entry_tid(), payload_bl),
@@ -101,12 +106,17 @@ Future JournalRecorder::append(uint64_t tag_tid,
   AppendBuffers append_buffers;
   append_buffers.push_back(std::make_pair(future, entry_bl));
   bool object_full = object_holder.object_ptr->append(append_buffers);
+  uint64_t obj_num = object_holder.object_ptr->get_object_number();
+  const std::string& oid = object_holder.object_ptr->get_oid();
+
+  object_holder.m_lock.Unlock();
 
   if (object_full) {
-    ldout(m_cct, 10) << "object " << object_holder.object_ptr->get_oid()
-                     << " now full" << dendl;
-    close_and_advance_object_set(object_holder.object_ptr->get_object_number()
-                                                           / splay_width);
+    Mutex::Locker l2(m_lock);
+    ldout(m_cct, 10) << "object " << oid << " now full" << dendl;
+    //ldout(m_cct, 2) << "OBJECT_FULL [" << (int)splay_offset << ", " << tag_tid << ", " << entry_tid << ", "
+    //                << commit_tid << "] obj_num=" << obj_num << dendl;
+    close_and_advance_object_set(obj_num / splay_width);
   }
   return Future(future);
 }
@@ -129,7 +139,7 @@ void JournalRecorder::flush(Context *on_safe) {
 }
 
 JournalRecorder::ObjectRecorderHolder& JournalRecorder::get_object(uint8_t splay_offset) {
-  assert(m_object_ptrs[splay_offset].m_lock.is_locked());
+  assert(m_lock.is_locked());
 
   ObjectRecorderHolder& object_holder = m_object_ptrs[splay_offset];
   assert(object_holder.object_ptr != NULL);
