@@ -9,6 +9,7 @@
 #include "include/Context.h"
 #include "include/interval_set.h"
 #include "common/Mutex.h"
+#include "common/Cond.h"
 #include "journal/Future.h"
 #include "journal/JournalMetadataListener.h"
 #include "journal/ReplayEntry.h"
@@ -165,6 +166,10 @@ public:
                        journal::JournalListenerPtr listener);
 
   int check_resync_requested(bool *do_resync);
+
+  inline ContextWQ *get_work_queue() {
+    return m_work_queue;
+  }
 
 private:
   ImageCtxT &m_image_ctx;

@@ -21,6 +21,7 @@
 #include "librbd/journal/CreateRequest.h"
 
 #include <boost/scope_exit.hpp>
+#include <utility>
 
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
@@ -149,7 +150,7 @@ struct C_DecodeTags : public Context {
 class ThreadPoolSingleton : public ThreadPool {
 public:
   explicit ThreadPoolSingleton(CephContext *cct)
-    : ThreadPool(cct, "librbd::Journal", "tp_librbd_journ", 1) {
+    : ThreadPool(cct, "librbd::Journal", "tp_librbd_journ", 16) {
     start();
   }
   virtual ~ThreadPoolSingleton() {
@@ -836,21 +837,22 @@ uint64_t Journal<I>::append_io_events(journal::EventType event_type,
                                       bool flush_entry) {
   assert(!bufferlists.empty());
 
-  Futures futures;
   uint64_t tid;
   {
-    {
-      Mutex::Locker locker(m_lock);
-      assert(m_state == STATE_READY);
+    Mutex::Locker locker(m_lock);
+    assert(m_state == STATE_READY);
 
-      tid = ++m_event_tid;
-      assert(tid != 0);
-    }
+    tid = ++m_event_tid;
+    assert(tid != 0);
+  }
 
-    for (auto &bl : bufferlists) {
-      assert(bl.length() <= m_max_append_size);
-      futures.push_back(m_journaler->append(m_tag_tid, bl));
-    }
+  Futures futures;
+  for (auto &bl : bufferlists) {
+    assert(bl.length() <= m_max_append_size);
+    futures.push_back(m_journaler->append(m_tag_tid, bl));
+  }
+
+  {
     Mutex::Locker event_locker(m_event_lock);
     m_events[tid] = Event(futures, requests, offset, length);
   }
@@ -870,6 +872,7 @@ uint64_t Journal<I>::append_io_events(journal::EventType event_type,
   } else {
     futures.back().wait(on_safe);
   }
+
   return tid;
 }
 
