@@ -21,6 +21,7 @@
 #include "librbd/journal/CreateRequest.h"
 
 #include <boost/scope_exit.hpp>
+#include <utility>
 
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
@@ -29,6 +30,33 @@
 namespace librbd {
 
 namespace {
+
+// helper for supporting lamba move captures
+template <typename T, typename F>
+struct CaptureImpl {
+  T t;
+  F f;
+
+  CaptureImpl(T &&t, F &&f) : t(std::forward<T>(t)), f(std::forward<F>(f)) {
+  }
+
+  template <typename ...Ts> auto operator()(Ts&&...args )
+    -> decltype(f(t, std::forward<Ts>(args)...)) {
+      return f(t, std::forward<Ts>(args)...);
+    }
+
+  template <typename ...Ts> auto operator()(Ts&&...args) const
+    -> decltype(f(t, std::forward<Ts>(args)...))
+    {
+      return f(t, std::forward<Ts>(args)...);
+    }
+};
+
+template <typename T, typename F>
+CaptureImpl<T, F> make_capture(T &&t, F &&f) {
+  return CaptureImpl<T, F>(std::forward<T>(t), std::forward<F>(f) );
+}
+
 
 struct C_DecodeTag : public Context {
   CephContext *cct;
@@ -149,7 +177,7 @@ struct C_DecodeTags : public Context {
 class ThreadPoolSingleton : public ThreadPool {
 public:
   explicit ThreadPoolSingleton(CephContext *cct)
-    : ThreadPool(cct, "librbd::Journal", "tp_librbd_journ", 1) {
+    : ThreadPool(cct, "librbd::Journal", "tp_librbd_journ", 16) {
     start();
   }
   virtual ~ThreadPoolSingleton() {
@@ -292,8 +320,8 @@ Journal<I>::Journal(I &image_ctx)
     m_lock("Journal<I>::m_lock"), m_state(STATE_UNINITIALIZED),
     m_error_result(0), m_replay_handler(this), m_close_pending(false),
     m_event_lock("Journal<I>::m_event_lock"), m_event_tid(0),
-    m_blocking_writes(false), m_journal_replay(NULL),
-    m_metadata_listener(this) {
+    m_pending_appends(0), m_blocking_writes(false),
+    m_journal_replay(NULL), m_metadata_listener(this) {
 
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 5) << this << ": ictx=" << &m_image_ctx << dendl;
@@ -615,6 +643,14 @@ void Journal<I>::close(Context *on_finish) {
   }
 
   if (m_state == STATE_READY) {
+    if (m_pending_appends > 0) {
+      m_work_queue->queue(new FunctionContext(
+        [this, on_finish] (int r) {
+          close(on_finish);
+        }
+      ));
+      return;
+    }
     stop_recording();
   }
 
@@ -836,39 +872,55 @@ uint64_t Journal<I>::append_io_events(journal::EventType event_type,
                                       bool flush_entry) {
   assert(!bufferlists.empty());
 
-  Futures futures;
   uint64_t tid;
   {
-    {
-      Mutex::Locker locker(m_lock);
-      assert(m_state == STATE_READY);
+    Mutex::Locker locker(m_lock);
+    assert(m_state == STATE_READY);
 
-      tid = ++m_event_tid;
-      assert(tid != 0);
-    }
+    tid = ++m_event_tid;
+    assert(tid != 0);
 
-    for (auto &bl : bufferlists) {
-      assert(bl.length() <= m_max_append_size);
-      futures.push_back(m_journaler->append(m_tag_tid, bl));
-    }
-    Mutex::Locker event_locker(m_event_lock);
-    m_events[tid] = Event(futures, requests, offset, length);
-  }
+    m_pending_appends++;
 
-  CephContext *cct = m_image_ctx.cct;
-  ldout(cct, 20) << this << " " << __func__ << ": "
-                 << "event=" << event_type << ", "
-                 << "new_reqs=" << requests.size() << ", "
-                 << "offset=" << offset << ", "
-                 << "length=" << length << ", "
-                 << "flush=" << flush_entry << ", tid=" << tid << dendl;
+    FunctionContext *ctx = new FunctionContext(
+        make_capture(std::move(bufferlists), [this, requests, offset, length,
+         tid, event_type, flush_entry](const Bufferlists &bufferlists, int r) {
+          Futures futures;
+          for (auto &bl : bufferlists) {
+            assert(bl.length() <= m_max_append_size);
+            futures.push_back(m_journaler->append(m_tag_tid, bl));
+          }
 
-  Context *on_safe = create_async_context_callback(
-    m_image_ctx, new C_IOEventSafe(this, tid));
-  if (flush_entry) {
-    futures.back().flush(on_safe);
-  } else {
-    futures.back().wait(on_safe);
+          {
+            Mutex::Locker event_locker(m_event_lock);
+            m_events[tid] = Event(futures, requests, offset, length);
+            m_events_cond.Signal();
+          }
+
+          {
+            Mutex::Locker locker(m_lock);
+            m_pending_appends--;
+          }
+
+          CephContext *cct = m_image_ctx.cct;
+          ldout(cct, 20) << this << " " << __func__ << ": "
+                         << "event=" << event_type << ", "
+                         << "new_reqs=" << requests.size() << ", "
+                         << "offset=" << offset << ", "
+                         << "length=" << length << ", "
+                         << "flush=" << flush_entry << ", tid=" << tid << dendl;
+
+          Context *on_safe = create_async_context_callback(
+            m_image_ctx, new C_IOEventSafe(this, tid));
+          if (flush_entry) {
+            futures.back().flush(on_safe);
+          } else {
+            futures.back().wait(on_safe);
+          }
+        }
+    ));
+
+    m_work_queue->queue(ctx);
   }
   return tid;
 }
@@ -1035,6 +1087,10 @@ typename Journal<I>::Future Journal<I>::wait_event(Mutex &lock, uint64_t tid,
   CephContext *cct = m_image_ctx.cct;
 
   typename Events::iterator it = m_events.find(tid);
+  while(it == m_events.end()) {
+    m_events_cond.Wait(m_event_lock);
+    it = m_events.find(tid);
+  }
   assert(it != m_events.end());
 
   Event &event = it->second;
