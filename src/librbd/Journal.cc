@@ -145,19 +145,6 @@ struct C_DecodeTags : public Context {
   }
 };
 
-// TODO: once journaler is 100% async, remove separate threads and
-// reuse ImageCtx's thread pool
-class ThreadPoolSingleton : public ThreadPool {
-public:
-  explicit ThreadPoolSingleton(CephContext *cct)
-    : ThreadPool(cct, "librbd::Journal", "tp_librbd_journ", 16) {
-    start();
-  }
-  virtual ~ThreadPoolSingleton() {
-    stop();
-  }
-};
-
 template <typename J>
 int open_journaler(CephContext *cct, J *journaler,
                    cls::journal::Client *client,
@@ -299,12 +286,10 @@ Journal<I>::Journal(I &image_ctx)
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 5) << this << ": ictx=" << &m_image_ctx << dendl;
 
-  ThreadPoolSingleton *thread_pool_singleton;
-  cct->lookup_or_create_singleton_object<ThreadPoolSingleton>(
-    thread_pool_singleton, "librbd::journal::thread_pool");
+  ThreadPool *thread_pool = ImageCtx::get_thread_pool_instance(cct);
   m_work_queue = new ContextWQ("librbd::journal::work_queue",
                                cct->_conf->rbd_op_thread_timeout,
-                               thread_pool_singleton);
+                               thread_pool);
   ImageCtx::get_timer_instance(cct, &m_timer, &m_timer_lock);
 }
 
