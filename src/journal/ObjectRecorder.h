@@ -9,6 +9,7 @@
 #include "common/Cond.h"
 #include "common/Mutex.h"
 #include "common/RefCountedObj.h"
+#include "common/WorkQueue.h"
 #include "journal/FutureImpl.h"
 #include <list>
 #include <map>
@@ -38,9 +39,9 @@ public:
 
   ObjectRecorder(librados::IoCtx &ioctx, const std::string &oid,
                  uint64_t object_number, std::shared_ptr<Mutex> lock,
-                 SafeTimer &timer, Mutex &timer_lock, Handler *handler,
-                 uint8_t order, uint32_t flush_interval, uint64_t flush_bytes,
-                 double flush_age);
+                 ContextWQ *work_queue, SafeTimer &timer, Mutex &timer_lock,
+                 Handler *handler, uint8_t order, uint32_t flush_interval,
+                 uint64_t flush_bytes, double flush_age);
   ~ObjectRecorder();
 
   inline uint64_t get_object_number() const {
@@ -86,6 +87,7 @@ private:
       object_recorder->put();
     }
     virtual void flush(const FutureImplPtr &future) {
+      Mutex::Locker locker(*(object_recorder->m_lock));
       object_recorder->flush(future);
     }
   };
@@ -114,6 +116,8 @@ private:
   std::string m_oid;
   uint64_t m_object_number;
   CephContext *m_cct;
+
+  ContextWQ *m_op_work_queue;
 
   SafeTimer &m_timer;
   Mutex &m_timer_lock;
@@ -146,6 +150,9 @@ private:
 
   bool m_in_flight_flushes;
   Cond m_in_flight_flushes_cond;
+
+  AppendBuffers m_pending_buffers;
+  bool m_aio_scheduled;
 
   void handle_append_task();
   void cancel_append_task();

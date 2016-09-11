@@ -31,33 +31,6 @@ namespace librbd {
 
 namespace {
 
-// helper for supporting lamba move captures
-template <typename T, typename F>
-struct CaptureImpl {
-  T t;
-  F f;
-
-  CaptureImpl(T &&t, F &&f) : t(std::forward<T>(t)), f(std::forward<F>(f)) {
-  }
-
-  template <typename ...Ts> auto operator()(Ts&&...args )
-    -> decltype(f(t, std::forward<Ts>(args)...)) {
-      return f(t, std::forward<Ts>(args)...);
-    }
-
-  template <typename ...Ts> auto operator()(Ts&&...args) const
-    -> decltype(f(t, std::forward<Ts>(args)...))
-    {
-      return f(t, std::forward<Ts>(args)...);
-    }
-};
-
-template <typename T, typename F>
-CaptureImpl<T, F> make_capture(T &&t, F &&f) {
-  return CaptureImpl<T, F>(std::forward<T>(t), std::forward<F>(f) );
-}
-
-
 struct C_DecodeTag : public Context {
   CephContext *cct;
   Mutex *lock;
@@ -320,8 +293,8 @@ Journal<I>::Journal(I &image_ctx)
     m_lock("Journal<I>::m_lock"), m_state(STATE_UNINITIALIZED),
     m_error_result(0), m_replay_handler(this), m_close_pending(false),
     m_event_lock("Journal<I>::m_event_lock"), m_event_tid(0),
-    m_pending_appends(0), m_blocking_writes(false),
-    m_journal_replay(NULL), m_metadata_listener(this) {
+    m_blocking_writes(false), m_journal_replay(NULL),
+    m_metadata_listener(this) {
 
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 5) << this << ": ictx=" << &m_image_ctx << dendl;
@@ -643,14 +616,6 @@ void Journal<I>::close(Context *on_finish) {
   }
 
   if (m_state == STATE_READY) {
-    if (m_pending_appends > 0) {
-      m_work_queue->queue(new FunctionContext(
-        [this, on_finish] (int r) {
-          close(on_finish);
-        }
-      ));
-      return;
-    }
     stop_recording();
   }
 
@@ -879,49 +844,35 @@ uint64_t Journal<I>::append_io_events(journal::EventType event_type,
 
     tid = ++m_event_tid;
     assert(tid != 0);
-
-    m_pending_appends++;
-
-    FunctionContext *ctx = new FunctionContext(
-        make_capture(std::move(bufferlists), [this, requests, offset, length,
-         tid, event_type, flush_entry](const Bufferlists &bufferlists, int r) {
-          Futures futures;
-          for (auto &bl : bufferlists) {
-            assert(bl.length() <= m_max_append_size);
-            futures.push_back(m_journaler->append(m_tag_tid, bl));
-          }
-
-          {
-            Mutex::Locker event_locker(m_event_lock);
-            m_events[tid] = Event(futures, requests, offset, length);
-            m_events_cond.Signal();
-          }
-
-          {
-            Mutex::Locker locker(m_lock);
-            m_pending_appends--;
-          }
-
-          CephContext *cct = m_image_ctx.cct;
-          ldout(cct, 20) << this << " " << __func__ << ": "
-                         << "event=" << event_type << ", "
-                         << "new_reqs=" << requests.size() << ", "
-                         << "offset=" << offset << ", "
-                         << "length=" << length << ", "
-                         << "flush=" << flush_entry << ", tid=" << tid << dendl;
-
-          Context *on_safe = create_async_context_callback(
-            m_image_ctx, new C_IOEventSafe(this, tid));
-          if (flush_entry) {
-            futures.back().flush(on_safe);
-          } else {
-            futures.back().wait(on_safe);
-          }
-        }
-    ));
-
-    m_work_queue->queue(ctx);
   }
+
+  Futures futures;
+  for (auto &bl : bufferlists) {
+    assert(bl.length() <= m_max_append_size);
+    futures.push_back(m_journaler->append(m_tag_tid, bl));
+  }
+
+  {
+    Mutex::Locker event_locker(m_event_lock);
+    m_events[tid] = Event(futures, requests, offset, length);
+  }
+
+  CephContext *cct = m_image_ctx.cct;
+  ldout(cct, 20) << this << " " << __func__ << ": "
+                 << "event=" << event_type << ", "
+                 << "new_reqs=" << requests.size() << ", "
+                 << "offset=" << offset << ", "
+                 << "length=" << length << ", "
+                 << "flush=" << flush_entry << ", tid=" << tid << dendl;
+
+  Context *on_safe = create_async_context_callback(
+    m_image_ctx, new C_IOEventSafe(this, tid));
+  if (flush_entry) {
+    futures.back().flush(on_safe);
+  } else {
+    futures.back().wait(on_safe);
+  }
+
   return tid;
 }
 
@@ -1087,10 +1038,6 @@ typename Journal<I>::Future Journal<I>::wait_event(Mutex &lock, uint64_t tid,
   CephContext *cct = m_image_ctx.cct;
 
   typename Events::iterator it = m_events.find(tid);
-  while(it == m_events.end()) {
-    m_events_cond.Wait(m_event_lock);
-    it = m_events.find(tid);
-  }
   assert(it != m_events.end());
 
   Event &event = it->second;

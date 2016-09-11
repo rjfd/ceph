@@ -19,17 +19,18 @@ namespace journal {
 
 ObjectRecorder::ObjectRecorder(librados::IoCtx &ioctx, const std::string &oid,
                                uint64_t object_number, shared_ptr<Mutex> lock,
-                               SafeTimer &timer, Mutex &timer_lock,
-                               Handler *handler, uint8_t order,
-                               uint32_t flush_interval, uint64_t flush_bytes,
-                               double flush_age)
+                               ContextWQ *work_queue, SafeTimer &timer,
+                               Mutex &timer_lock, Handler *handler,
+                               uint8_t order, uint32_t flush_interval,
+                               uint64_t flush_bytes, double flush_age)
   : RefCountedObject(NULL, 0), m_oid(oid), m_object_number(object_number),
-    m_cct(NULL), m_timer(timer), m_timer_lock(timer_lock),
-    m_handler(handler), m_order(order), m_soft_max_size(1 << m_order),
-    m_flush_interval(flush_interval), m_flush_bytes(flush_bytes),
-    m_flush_age(flush_age), m_flush_handler(this), m_append_task(NULL),
-    m_lock(lock), m_append_tid(0), m_pending_bytes(0), m_size(0),
-    m_overflowed(false), m_object_closed(false), m_in_flight_flushes(false) {
+    m_cct(NULL), m_op_work_queue(work_queue), m_timer(timer),
+    m_timer_lock(timer_lock), m_handler(handler), m_order(order),
+    m_soft_max_size(1 << m_order), m_flush_interval(flush_interval),
+    m_flush_bytes(flush_bytes), m_flush_age(flush_age), m_flush_handler(this),
+    m_append_task(NULL), m_lock(lock), m_append_tid(0), m_pending_bytes(0),
+    m_size(0), m_overflowed(false), m_object_closed(false),
+    m_in_flight_flushes(false), m_aio_scheduled(false) {
   m_ioctx.dup(ioctx);
   m_cct = reinterpret_cast<CephContext*>(m_ioctx.cct());
   assert(m_handler != NULL);
@@ -180,7 +181,7 @@ bool ObjectRecorder::close() {
 
   assert(!m_object_closed);
   m_object_closed = true;
-  return m_in_flight_tids.empty();
+  return m_in_flight_tids.empty() && !m_aio_scheduled;
 }
 
 void ObjectRecorder::handle_append_task() {
@@ -331,32 +332,55 @@ void ObjectRecorder::send_appends(AppendBuffers *append_buffers) {
   assert(m_lock->is_locked());
   assert(!append_buffers->empty());
 
-  uint64_t append_tid = m_append_tid++;
-  ldout(m_cct, 10) << __func__ << ": " << m_oid << " flushing journal tid="
-                   << append_tid << dendl;
-  C_AppendFlush *append_flush = new C_AppendFlush(this, append_tid);
-
-  librados::ObjectWriteOperation op;
-  client::guard_append(&op, m_soft_max_size);
-
   for (AppendBuffers::iterator it = append_buffers->begin();
        it != append_buffers->end(); ++it) {
     ldout(m_cct, 20) << __func__ << ": flushing " << *it->first
                      << dendl;
     it->first->set_flush_in_progress();
-    op.append(it->second);
-    op.set_op_flags2(CEPH_OSD_OP_FLAG_FADVISE_DONTNEED);
     m_size += it->second.length();
   }
-  m_in_flight_tids.insert(append_tid);
-  m_in_flight_appends[append_tid].swap(*append_buffers);
 
-  librados::AioCompletion *rados_completion =
-    librados::Rados::aio_create_completion(append_flush, NULL,
-                                           utils::rados_ctx_callback);
-  int r = m_ioctx.aio_operate(m_oid, rados_completion, &op);
-  assert(r == 0);
-  rados_completion->release();
+  m_pending_buffers.splice(m_pending_buffers.end(), *append_buffers,
+                           append_buffers->begin(), append_buffers->end());
+  if (!m_aio_scheduled) {
+    m_op_work_queue->queue(new FunctionContext(
+      [this] (int r) {
+        Mutex::Locker locker(*m_lock);
+
+        m_aio_scheduled = false;
+
+        AppendBuffers append_buffers;
+        m_pending_buffers.swap(append_buffers);
+
+        uint64_t append_tid = m_append_tid++;
+        ldout(m_cct, 10) << __func__ << ": " << m_oid << " flushing journal tid="
+                         << append_tid << dendl;
+        C_AppendFlush *append_flush = new C_AppendFlush(this, append_tid);
+
+        librados::ObjectWriteOperation op;
+        client::guard_append(&op, m_soft_max_size);
+
+        for (AppendBuffers::iterator it = append_buffers.begin();
+             it != append_buffers.end(); ++it) {
+          ldout(m_cct, 20) << __func__ << ": flushing " << *it->first
+                           << dendl;
+          op.append(it->second);
+          op.set_op_flags2(CEPH_OSD_OP_FLAG_FADVISE_DONTNEED);
+        }
+        m_in_flight_tids.insert(append_tid);
+        m_in_flight_appends[append_tid].swap(append_buffers);
+
+        librados::AioCompletion *rados_completion =
+          librados::Rados::aio_create_completion(append_flush, NULL,
+                                                 utils::rados_ctx_callback);
+        r = m_ioctx.aio_operate(m_oid, rados_completion, &op);
+        assert(r == 0);
+        rados_completion->release();
+
+      }
+    ));
+    m_aio_scheduled = true;
+  }
 }
 
 void ObjectRecorder::notify_handler() {

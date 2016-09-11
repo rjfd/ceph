@@ -246,10 +246,10 @@ ObjectRecorderPtr JournalRecorder::create_object_recorder(
     uint64_t object_number, shared_ptr<Mutex> lock) {
   ObjectRecorderPtr object_recorder(new ObjectRecorder(
     m_ioctx, utils::get_object_name(m_object_oid_prefix, object_number),
-    object_number, lock, m_journal_metadata->get_timer(),
-    m_journal_metadata->get_timer_lock(), &m_object_handler,
-    m_journal_metadata->get_order(), m_flush_interval, m_flush_bytes,
-    m_flush_age));
+    object_number, lock, m_journal_metadata->get_work_queue(),
+    m_journal_metadata->get_timer(), m_journal_metadata->get_timer_lock(),
+    &m_object_handler, m_journal_metadata->get_order(), m_flush_interval,
+    m_flush_bytes, m_flush_age));
   return object_recorder;
 }
 

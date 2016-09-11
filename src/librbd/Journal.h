@@ -293,8 +293,6 @@ private:
   Mutex m_event_lock;
   uint64_t m_event_tid;
   Events m_events;
-  Cond m_events_cond;
-  uint32_t m_pending_appends;
 
   atomic_t m_op_tid;
   TidToFutures m_op_futures;
