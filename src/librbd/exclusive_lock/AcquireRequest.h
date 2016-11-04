@@ -15,13 +15,19 @@ class Context;
 namespace librbd {
 
 template <typename> class Journal;
+template <typename> class ManagedLock;
 
 namespace exclusive_lock {
 
 template <typename ImageCtxT = ImageCtx>
 class AcquireRequest {
+private:
+  ImageCtxT &m_image_ctx;
+
 public:
-  static AcquireRequest* create(ImageCtxT &image_ctx, const std::string &cookie,
+  typedef ManagedLock<typename std::decay<decltype(*m_image_ctx.image_watcher)>::type> LockT;
+
+  static AcquireRequest* create(ImageCtxT &image_ctx, LockT *managed_lock,
                                 Context *on_acquire, Context *on_finish);
 
   ~AcquireRequest();
@@ -40,24 +46,20 @@ private:
    *    v
    * FLUSH_NOTIFIES
    *    |
-   *    |     /-----------------------------------------------------------\
-   *    |     |                                                           |
-   *    |     |             (no lockers)                                  |
-   *    |     |   . . . . . . . . . . . . . . . . . . . . . .             |
-   *    |     |   .                                         .             |
-   *    |     v   v      (EBUSY)                            .             |
-   *    \--> LOCK_IMAGE * * * * * * * * > GET_LOCKERS . . . .             |
-   *              |                         |                             |
-   *              v                         v                             |
-   *         REFRESH (skip if not         GET_WATCHERS                    |
-   *              |   needed)               |                             |
-   *              v                         v                             |
-   *         OPEN_OBJECT_MAP (skip if     BLACKLIST (skip if blacklist    |
-   *              |           disabled)     |        disabled)            |
-   *              v                         v                             |
-   *         OPEN_JOURNAL (skip if        BREAK_LOCK                      |
-   *              |   *     disabled)       |                             |
-   *              |   *                     \-----------------------------/
+   *    |
+   *    |
+   *    \--> LOCK_IMAGE
+   *              |
+   *              v
+   *         REFRESH (skip if not
+   *              |   needed)
+   *              v
+   *         OPEN_OBJECT_MAP (skip if
+   *              |           disabled)
+   *              v
+   *         OPEN_JOURNAL (skip if
+   *              |   *     disabled)
+   *              |   *
    *              |   * * * * * * * *
    *              v                 *
    *          ALLOCATE_JOURNAL_TAG  *
@@ -78,74 +80,71 @@ private:
    * @endverbatim
    */
 
-  AcquireRequest(ImageCtxT &image_ctx, const std::string &cookie,
+  AcquireRequest(ImageCtxT &image_ctx, LockT *managed_lock,
                  Context *on_acquire, Context *on_finish);
 
-  ImageCtxT &m_image_ctx;
-  std::string m_cookie;
+  LockT *m_managed_lock;
   Context *m_on_acquire;
   Context *m_on_finish;
 
-  bufferlist m_out_bl;
-
-  std::list<obj_watch_t> m_watchers;
-  int m_watchers_ret_val;
-
   decltype(m_image_ctx.object_map) m_object_map;
   decltype(m_image_ctx.journal) m_journal;
-
-  entity_name_t m_locker_entity;
-  std::string m_locker_cookie;
-  std::string m_locker_address;
-  uint64_t m_locker_handle;
 
   int m_error_result;
   bool m_prepare_lock_completed = false;
 
   void send_prepare_lock();
-  Context *handle_prepare_lock(int *ret_val);
+  void handle_prepare_lock(int r);
 
   void send_flush_notifies();
-  Context *handle_flush_notifies(int *ret_val);
+  void handle_flush_notifies(int r);
 
   void send_lock();
-  Context *handle_lock(int *ret_val);
+  void handle_lock(int r);
 
-  Context *send_refresh();
-  Context *handle_refresh(int *ret_val);
+  void send_refresh();
+  void handle_refresh(int r);
 
-  Context *send_open_journal();
-  Context *handle_open_journal(int *ret_val);
+  void send_open_journal();
+  void handle_open_journal(int r);
 
   void send_allocate_journal_tag();
-  Context *handle_allocate_journal_tag(int *ret_val);
+  void handle_allocate_journal_tag(int r);
 
-  Context *send_open_object_map();
-  Context *handle_open_object_map(int *ret_val);
+  void send_open_object_map();
+  void handle_open_object_map(int r);
 
   void send_close_journal();
-  Context *handle_close_journal(int *ret_val);
+  void handle_close_journal(int r);
 
   void send_close_object_map();
-  Context *handle_close_object_map(int *ret_val);
+  void handle_close_object_map(int r);
 
   void send_unlock();
-  Context *handle_unlock(int *ret_val);
+  void handle_unlock(int r);
 
   void send_get_lockers();
-  Context *handle_get_lockers(int *ret_val);
+  void handle_get_lockers(int r);
 
   void send_get_watchers();
-  Context *handle_get_watchers(int *ret_val);
+  void handle_get_watchers(int r);
 
   void send_blacklist();
-  Context *handle_blacklist(int *ret_val);
+  void handle_blacklist(int r);
 
   void send_break_lock();
-  Context *handle_break_lock(int *ret_val);
+  void handle_break_lock(int r);
 
   void apply();
-  void revert(int *ret_val);
+  void revert(int r);
+
+  void finish();
+
+  void save_result(int result) {
+    if (m_error_result == 0 && result < 0) {
+      m_error_result = result;
+    }
+  }
 };
 
 } // namespace exclusive_lock

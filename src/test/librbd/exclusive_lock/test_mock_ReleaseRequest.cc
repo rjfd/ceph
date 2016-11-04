@@ -4,10 +4,12 @@
 #include "test/librbd/test_mock_fixture.h"
 #include "test/librbd/test_support.h"
 #include "test/librbd/mock/MockImageCtx.h"
+#include "test/librbd/mock/MockImageWatcher.h"
 #include "test/librbd/mock/MockJournal.h"
 #include "test/librbd/mock/MockObjectMap.h"
 #include "test/librados_test_stub/MockTestMemIoCtxImpl.h"
 #include "librbd/exclusive_lock/ReleaseRequest.h"
+#include "librbd/ManagedLock.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include <list>
@@ -16,7 +18,14 @@
 #include "librbd/exclusive_lock/ReleaseRequest.cc"
 template class librbd::exclusive_lock::ReleaseRequest<librbd::MockImageCtx>;
 
+#include "librbd/ManagedLock.cc"
+template class librbd::ManagedLock<librbd::MockImageWatcher>;
+
 namespace librbd {
+
+using librbd::ManagedLock;
+using librbd::MockImageWatcher;
+
 namespace exclusive_lock {
 
 namespace {
@@ -39,6 +48,7 @@ static const std::string TEST_COOKIE("auto 123");
 class TestMockExclusiveLockReleaseRequest : public TestMockFixture {
 public:
   typedef ReleaseRequest<MockImageCtx> MockReleaseRequest;
+  typedef ManagedLock<MockImageWatcher> MockManagedLock;
 
   void expect_complete_context(MockContext &mock_context, int r) {
     EXPECT_CALL(mock_context, complete(r));
@@ -79,6 +89,21 @@ public:
                   .WillOnce(Return(r));
   }
 
+  void expect_get_watch_handle(MockImageCtx &mock_image_ctx,
+                               uint64_t watch_handle = 1234567890) {
+    EXPECT_CALL(*mock_image_ctx.image_watcher, is_registered())
+      .WillOnce(Return(true));
+    EXPECT_CALL(*mock_image_ctx.image_watcher, get_watch_handle())
+                  .WillRepeatedly(Return(watch_handle));
+  }
+
+  void expect_lock(MockImageCtx &mock_image_ctx, int r) {
+    EXPECT_CALL(get_mock_io_ctx(mock_image_ctx.md_ctx),
+                exec(mock_image_ctx.header_oid, _, StrEq("lock"), StrEq("lock"), _, _, _))
+                  .WillOnce(Return(r));
+  }
+
+
   void expect_close_journal(MockImageCtx &mock_image_ctx,
                            MockJournal &mock_journal, int r) {
     EXPECT_CALL(mock_journal, close(_))
@@ -107,6 +132,28 @@ public:
     EXPECT_CALL(*mock_image_ctx.state, handle_prepare_lock_complete());
   }
 
+  MockManagedLock *lock_initialize(MockImageCtx &mock_image_ctx,
+                                   ContextWQ *work_queue) {
+    MockManagedLock *managed_lock = new MockManagedLock(
+      mock_image_ctx.md_ctx, work_queue,
+      mock_image_ctx.header_oid, mock_image_ctx.image_watcher);
+    C_SaferCond lock_ctx;
+    managed_lock->acquire_lock(&lock_ctx);
+    lock_ctx.wait();
+    return managed_lock;
+  }
+
+  void lock_shut_down(MockManagedLock *managed_lock, MockImageCtx &mock_image_ctx,
+                      bool expect = false) {
+    if (expect) {
+      expect_unlock(mock_image_ctx, 0);
+    }
+    C_SaferCond ctx2;
+    managed_lock->shut_down(&ctx2);
+    ctx2.wait();
+    delete managed_lock;
+  }
+
 };
 
 TEST_F(TestMockExclusiveLockReleaseRequest, Success) {
@@ -117,8 +164,11 @@ TEST_F(TestMockExclusiveLockReleaseRequest, Success) {
 
   MockImageCtx mock_image_ctx(*ictx);
   expect_op_work_queue(mock_image_ctx);
+  expect_get_watch_handle(mock_image_ctx);
 
   InSequence seq;
+  expect_lock(mock_image_ctx, 0);
+
   expect_prepare_lock(mock_image_ctx);
   expect_cancel_op_requests(mock_image_ctx, 0);
   expect_block_writes(mock_image_ctx, 0);
@@ -137,13 +187,17 @@ TEST_F(TestMockExclusiveLockReleaseRequest, Success) {
   expect_unlock(mock_image_ctx, 0);
   expect_handle_prepare_lock_complete(mock_image_ctx);
 
+  MockManagedLock *managed_lock = lock_initialize(mock_image_ctx,
+                                                  ictx->op_work_queue);
   C_SaferCond ctx;
   MockReleaseRequest *req = MockReleaseRequest::create(mock_image_ctx,
-                                                       TEST_COOKIE,
+                                                       managed_lock,
                                                        &mock_releasing_ctx,
                                                        &ctx, false);
   req->send();
   ASSERT_EQ(0, ctx.wait());
+
+  lock_shut_down(managed_lock, mock_image_ctx);
 }
 
 TEST_F(TestMockExclusiveLockReleaseRequest, SuccessJournalDisabled) {
@@ -155,8 +209,10 @@ TEST_F(TestMockExclusiveLockReleaseRequest, SuccessJournalDisabled) {
   MockImageCtx mock_image_ctx(*ictx);
   expect_block_writes(mock_image_ctx, 0);
   expect_op_work_queue(mock_image_ctx);
+  expect_get_watch_handle(mock_image_ctx);
 
   InSequence seq;
+  expect_lock(mock_image_ctx, 0);
   expect_prepare_lock(mock_image_ctx);
   expect_cancel_op_requests(mock_image_ctx, 0);
   expect_flush_notifies(mock_image_ctx);
@@ -168,15 +224,19 @@ TEST_F(TestMockExclusiveLockReleaseRequest, SuccessJournalDisabled) {
   expect_unlock(mock_image_ctx, 0);
   expect_handle_prepare_lock_complete(mock_image_ctx);
 
+  MockManagedLock *managed_lock = lock_initialize(mock_image_ctx,
+                                                  ictx->op_work_queue);
+
   C_SaferCond release_ctx;
   C_SaferCond ctx;
   MockReleaseRequest *req = MockReleaseRequest::create(mock_image_ctx,
-                                                       TEST_COOKIE,
+                                                       managed_lock,
                                                        &release_ctx, &ctx,
                                                        false);
   req->send();
   ASSERT_EQ(0, release_ctx.wait());
   ASSERT_EQ(0, ctx.wait());
+  lock_shut_down(managed_lock, mock_image_ctx);
 }
 
 TEST_F(TestMockExclusiveLockReleaseRequest, SuccessObjectMapDisabled) {
@@ -188,22 +248,28 @@ TEST_F(TestMockExclusiveLockReleaseRequest, SuccessObjectMapDisabled) {
   MockImageCtx mock_image_ctx(*ictx);
   expect_block_writes(mock_image_ctx, 0);
   expect_op_work_queue(mock_image_ctx);
+  expect_get_watch_handle(mock_image_ctx);
 
   InSequence seq;
+  expect_lock(mock_image_ctx, 0);
   expect_cancel_op_requests(mock_image_ctx, 0);
   expect_flush_notifies(mock_image_ctx);
 
   expect_unlock(mock_image_ctx, 0);
 
+  MockManagedLock *managed_lock = lock_initialize(mock_image_ctx,
+                                                  ictx->op_work_queue);
+
   C_SaferCond release_ctx;
   C_SaferCond ctx;
   MockReleaseRequest *req = MockReleaseRequest::create(mock_image_ctx,
-                                                       TEST_COOKIE,
+                                                       managed_lock,
                                                        &release_ctx, &ctx,
                                                        true);
   req->send();
   ASSERT_EQ(0, release_ctx.wait());
   ASSERT_EQ(0, ctx.wait());
+  lock_shut_down(managed_lock, mock_image_ctx);
 }
 
 TEST_F(TestMockExclusiveLockReleaseRequest, BlockWritesError) {
@@ -214,19 +280,23 @@ TEST_F(TestMockExclusiveLockReleaseRequest, BlockWritesError) {
 
   MockImageCtx mock_image_ctx(*ictx);
   expect_op_work_queue(mock_image_ctx);
+  expect_get_watch_handle(mock_image_ctx);
 
   InSequence seq;
+  expect_lock(mock_image_ctx, 0);
   expect_cancel_op_requests(mock_image_ctx, 0);
   expect_block_writes(mock_image_ctx, -EINVAL);
   expect_unblock_writes(mock_image_ctx);
 
   C_SaferCond ctx;
+  MockManagedLock *managed_lock = lock_initialize(mock_image_ctx, ictx->op_work_queue);
   MockReleaseRequest *req = MockReleaseRequest::create(mock_image_ctx,
-                                                       TEST_COOKIE,
+                                                       managed_lock,
                                                        nullptr, &ctx,
                                                        true);
   req->send();
   ASSERT_EQ(-EINVAL, ctx.wait());
+  lock_shut_down(managed_lock, mock_image_ctx, true);
 }
 
 TEST_F(TestMockExclusiveLockReleaseRequest, UnlockError) {
@@ -237,8 +307,10 @@ TEST_F(TestMockExclusiveLockReleaseRequest, UnlockError) {
 
   MockImageCtx mock_image_ctx(*ictx);
   expect_op_work_queue(mock_image_ctx);
+  expect_get_watch_handle(mock_image_ctx);
 
   InSequence seq;
+  expect_lock(mock_image_ctx, 0);
   expect_cancel_op_requests(mock_image_ctx, 0);
   expect_block_writes(mock_image_ctx, 0);
   expect_flush_notifies(mock_image_ctx);
@@ -246,12 +318,14 @@ TEST_F(TestMockExclusiveLockReleaseRequest, UnlockError) {
   expect_unlock(mock_image_ctx, -EINVAL);
 
   C_SaferCond ctx;
+  MockManagedLock *managed_lock = lock_initialize(mock_image_ctx, ictx->op_work_queue);
   MockReleaseRequest *req = MockReleaseRequest::create(mock_image_ctx,
-                                                       TEST_COOKIE,
+                                                       managed_lock,
                                                        nullptr, &ctx,
                                                        true);
   req->send();
   ASSERT_EQ(0, ctx.wait());
+  lock_shut_down(managed_lock, mock_image_ctx);
 }
 
 } // namespace exclusive_lock

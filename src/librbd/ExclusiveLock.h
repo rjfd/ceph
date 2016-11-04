@@ -8,19 +8,19 @@
 #include "include/Context.h"
 #include "include/rados/librados.hpp"
 #include "common/Mutex.h"
+#include "librbd/ImageCtx.h"
 #include <list>
 #include <string>
 #include <utility>
 
 namespace librbd {
 
-class ImageCtx;
+
+template <typename> class ManagedLock;
 
 template <typename ImageCtxT = ImageCtx>
 class ExclusiveLock {
 public:
-  static const std::string WATCHER_LOCK_TAG;
-
   static ExclusiveLock *create(ImageCtxT &image_ctx) {
     return new ExclusiveLock<ImageCtxT>(image_ctx);
   }
@@ -46,8 +46,6 @@ public:
   void handle_peer_notification();
 
   void assert_header_locked(librados::ObjectWriteOperation *op);
-
-  static bool decode_lock_cookie(const std::string &cookie, uint64_t *handle);
 
 private:
 
@@ -143,18 +141,16 @@ private:
 
   ImageCtxT &m_image_ctx;
 
+  typedef typename std::decay<decltype(*m_image_ctx.image_watcher)>::type ImageWatcherT;
+  ManagedLock<ImageWatcherT> *m_managed_lock;
+
   mutable Mutex m_lock;
   State m_state;
-  std::string m_cookie;
-  std::string m_new_cookie;
-  uint64_t m_watch_handle;
 
   ActionsContexts m_actions_contexts;
 
   uint32_t m_request_blocked_count = 0;
   int m_request_blocked_ret_val = 0;
-
-  std::string encode_lock_cookie() const;
 
   bool is_transition_state() const;
 

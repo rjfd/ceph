@@ -37,7 +37,6 @@ set(librbd_internal_srcs
   ManagedLock.cc
   exclusive_lock/AcquireRequest.cc
   exclusive_lock/AutomaticPolicy.cc
-  exclusive_lock/ReacquireRequest.cc
   exclusive_lock/ReleaseRequest.cc
   exclusive_lock/StandardPolicy.cc
   image/CloseRequest.cc
