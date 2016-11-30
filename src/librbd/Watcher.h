@@ -30,12 +30,12 @@ public:
 
   void set_oid(const string& oid);
 
-  uint64_t get_watch_handle() const {
+  virtual uint64_t get_watch_handle() const {
     RWLock::RLocker watch_locker(m_watch_lock);
     return m_watch_handle;
   }
 
-  bool is_registered() const {
+  virtual bool is_registered() const {
     RWLock::RLocker locker(m_watch_lock);
     return m_watch_state == WATCH_STATE_REGISTERED;
   }
