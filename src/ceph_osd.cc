@@ -489,6 +489,9 @@ flushjournal_out:
   Messenger *ms_hb_front_client = Messenger::create(g_ceph_context, public_msg_type,
 					     entity_name_t::OSD(whoami), "hb_front_client",
 					     getpid(), Messenger::HEARTBEAT);
+  Messenger *ms_hb_front_client_legacy = Messenger::create(g_ceph_context, public_msg_type,
+					     entity_name_t::OSD(whoami), "hb_front_client_legacy",
+					     getpid(), Messenger::HEARTBEAT);
   Messenger *ms_hb_back_server = Messenger::create(g_ceph_context, cluster_msg_type,
 						   entity_name_t::OSD(whoami), "hb_back_server",
 						   getpid(), Messenger::HEARTBEAT);
@@ -501,7 +504,7 @@ flushjournal_out:
   if (!ms_public || !ms_cluster || !ms_hb_front_client || !ms_hb_back_client || !ms_hb_back_server || !ms_hb_front_server || !ms_objecter)
     exit(1);
   ms_cluster->set_cluster_protocol(CEPH_OSD_PROTOCOL);
-  ms_hb_front_client->set_cluster_protocol(CEPH_OSD_PROTOCOL);
+  ms_hb_front_client_legacy->set_cluster_protocol(CEPH_OSDC_PROTOCOL);
   ms_hb_back_client->set_cluster_protocol(CEPH_OSD_PROTOCOL);
   ms_hb_back_server->set_cluster_protocol(CEPH_OSD_PROTOCOL);
   ms_hb_front_server->set_cluster_protocol(CEPH_OSD_PROTOCOL);
@@ -550,6 +553,8 @@ flushjournal_out:
 
   ms_hb_front_client->set_policy(entity_name_t::TYPE_OSD,
 			  Messenger::Policy::lossy_client(0));
+  ms_hb_front_client_legacy->set_policy(entity_name_t::TYPE_OSD,
+			  Messenger::Policy::lossy_client(0));
   ms_hb_back_client->set_policy(entity_name_t::TYPE_OSD,
 			  Messenger::Policy::lossy_client(0));
   ms_hb_back_server->set_policy(entity_name_t::TYPE_OSD,
@@ -568,6 +573,7 @@ flushjournal_out:
   bool is_delay = g_conf->get_val<bool>("osd_heartbeat_use_min_delay_socket");
   if (is_delay) {
     ms_hb_front_client->set_socket_priority(SOCKET_PRIORITY_MIN_DELAY);
+    ms_hb_front_client_legacy->set_socket_priority(SOCKET_PRIORITY_MIN_DELAY);
     ms_hb_back_client->set_socket_priority(SOCKET_PRIORITY_MIN_DELAY);
     ms_hb_back_server->set_socket_priority(SOCKET_PRIORITY_MIN_DELAY);
     ms_hb_front_server->set_socket_priority(SOCKET_PRIORITY_MIN_DELAY);
@@ -593,6 +599,9 @@ flushjournal_out:
   if (ms_hb_front_server->bind(hb_front_addr) < 0)
     exit(1);
   if (ms_hb_front_client->client_bind(hb_front_addr) < 0)
+    exit(1);
+  r = ms_hb_front_client_legacy->client_bind(hb_front_addr);
+  if (r < 0)
     exit(1);
 
   // Set up crypto, daemonize, etc.
@@ -623,6 +632,7 @@ flushjournal_out:
                 ms_cluster,
                 ms_public,
                 ms_hb_front_client,
+		ms_hb_front_client_legacy,
                 ms_hb_back_client,
                 ms_hb_front_server,
                 ms_hb_back_server,
@@ -640,6 +650,7 @@ flushjournal_out:
 
   ms_public->start();
   ms_hb_front_client->start();
+  ms_hb_front_client_legacy->start();
   ms_hb_back_client->start();
   ms_hb_front_server->start();
   ms_hb_back_server->start();
@@ -671,6 +682,7 @@ flushjournal_out:
 
   ms_public->wait();
   ms_hb_front_client->wait();
+  ms_hb_front_client_legacy->wait();
   ms_hb_back_client->wait();
   ms_hb_front_server->wait();
   ms_hb_back_server->wait();
@@ -686,6 +698,7 @@ flushjournal_out:
   delete osd;
   delete ms_public;
   delete ms_hb_front_client;
+  delete ms_hb_front_client_legacy;
   delete ms_hb_back_client;
   delete ms_hb_front_server;
   delete ms_hb_back_server;
