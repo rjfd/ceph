@@ -14,17 +14,35 @@
 #include "msg/xio/XioMessenger.h"
 #endif
 
-Messenger *Messenger::create_client_messenger(CephContext *cct, string lname)
+Messenger *Messenger::create_client_messenger(CephContext *cct,
+                                              string lname)
+{
+  return Messenger::create_client_messenger(cct, Messenger::MSG_PROTOCOL_V2,
+                                            lname);
+}
+
+Messenger *Messenger::create_client_messenger(CephContext *cct,
+                                              msg_protocol_t protocol,
+                                              string lname)
 {
   std::string public_msgr_type = cct->_conf->ms_public_type.empty() ? cct->_conf->get_val<std::string>("ms_type") : cct->_conf->ms_public_type;
   auto nonce = ceph::util::generate_random_number<uint64_t>();
-  return Messenger::create(cct, public_msgr_type, entity_name_t::CLIENT(),
+  return Messenger::create(cct, protocol, public_msgr_type, entity_name_t::CLIENT(),
 			   std::move(lname), nonce, 0);
 }
 
 Messenger *Messenger::create(CephContext *cct, const string &type,
-			     entity_name_t name, string lname,
-			     uint64_t nonce, uint64_t cflags)
+                             entity_name_t name, string lname, uint64_t nonce,
+                             uint64_t cflags)
+{
+  return Messenger::create(cct, Messenger::MSG_PROTOCOL_V2, type, name, lname,
+                           nonce, cflags);
+}
+
+Messenger *Messenger::create(CephContext *cct, msg_protocol_t protocol,
+                             const string &type,
+                             entity_name_t name, string lname,
+                             uint64_t nonce, uint64_t cflags)
 {
   int r = -1;
   if (type == "random") {
@@ -33,7 +51,8 @@ Messenger *Messenger::create(CephContext *cct, const string &type,
   if (r == 0 || type == "simple")
     return new SimpleMessenger(cct, name, std::move(lname), nonce);
   else if (r == 1 || type.find("async") != std::string::npos)
-    return new AsyncMessenger(cct, name, type, std::move(lname), nonce);
+    return new AsyncMessenger(cct, name, protocol, type, std::move(lname),
+                              nonce);
 #ifdef HAVE_XIO
   else if ((type == "xio") &&
 	   cct->check_experimental_feature_enabled("ms-type-xio"))

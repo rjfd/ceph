@@ -30,6 +30,7 @@
 #include "include/buffer.h"
 #include "msg/Connection.h"
 #include "msg/Messenger.h"
+#include "msg/DispatchQueue.h"
 
 #include "Event.h"
 #include "Stack.h"
@@ -60,6 +61,7 @@ class AsyncConnection : public Connection {
   void prepare_send_message(uint64_t features, Message *m, bufferlist &bl);
   ssize_t read_until(unsigned needed, char *p);
   ssize_t _process_connection();
+  ssize_t _process_connection_v2();
   void _connect();
   void _stop();
   int handle_connect_reply(ceph_msg_connect &connect, ceph_msg_connect_reply &r);
@@ -373,6 +375,7 @@ class AsyncConnection : public Connection {
   // used by eventcallback
   void handle_write();
   void process();
+  void process_v2();
   void wakeup_from(uint64_t id);
   void tick(uint64_t id);
   void local_deliver();

@@ -58,6 +58,7 @@ int main(int argc, const char **argv)
 
 	std::string addr = "localhost";
 	std::string port = "1234";
+    std::string prot = "v1";
 
 	int n_msgs = 50;
 	int n_dsize = 0;
@@ -85,7 +86,10 @@ int main(int argc, const char **argv)
 	    n_msgs = atoi(val.c_str());;
 	  } else if (ceph_argparse_witharg(args, arg_iter, &val, "--dsize",
 				    (char*) NULL)) {
-	    n_dsize = atoi(val.c_str());;
+          n_dsize = atoi(val.c_str());;
+      } else if (ceph_argparse_witharg(args, arg_iter, &val, "--prot",
+                                       (char *)NULL)) {
+          prot = val;
 	  } else {
 	    ++arg_iter;
 	  }
@@ -116,6 +120,7 @@ int main(int argc, const char **argv)
 	dest_str += addr;
 	dest_str += ":";
 	dest_str += port;
+    dest_addr = entity_addr_t(entity_addr_t::TYPE_MSGR2);
 	entity_addr_from_url(&dest_addr, dest_str.c_str());
 	entity_inst_t dest_server(entity_name_t::MON(-1), dest_addr);
 
@@ -156,6 +161,9 @@ int main(int argc, const char **argv)
 	cout << "Processed " << dispatcher->get_dcount() + n_msgs
 	     << " round-trip messages in " << t2-t1 << "s"
 	     << std::endl;
+
+	messenger->shutdown();
+  messenger->wait();
 out:
 	return r;
 }

@@ -19,8 +19,8 @@
 #include "include/Context.h"
 #include "include/random.h"
 #include "common/errno.h"
-#include "AsyncMessenger.h"
 #include "AsyncConnection.h"
+#include "AsyncMessenger.h"
 
 #include "messages/MOSDOp.h"
 #include "messages/MOSDOpReply.h"
@@ -64,7 +64,11 @@ class C_handle_read : public EventCallback {
  public:
   explicit C_handle_read(AsyncConnectionRef c): conn(c) {}
   void do_request(uint64_t fd_or_id) override {
-    conn->process();
+    if (conn->get_messenger()->is_protocol_v2()) {
+      conn->process_v2();
+    } else {
+      conn->process();
+    }
   }
 };
 
@@ -122,7 +126,8 @@ AsyncConnection::AsyncConnection(CephContext *cct, AsyncMessenger *m, DispatchQu
   : Connection(cct, m), delay_state(NULL), async_msgr(m), conn_id(q->get_id()),
     logger(w->get_perf_counter()), global_seq(0), connect_seq(0), peer_global_seq(0),
     state(STATE_NONE), state_after_send(STATE_NONE), port(-1),
-    dispatch_queue(q), can_write(WriteStatus::NOWRITE),
+    dispatch_queue(q),
+    can_write(WriteStatus::NOWRITE),
     keepalive(false), recv_buf(NULL),
     recv_max_prefetch(MAX(msgr->cct->_conf->ms_tcp_prefetch_max_size, TCP_PREFETCH_MIN_SIZE)),
     recv_start(0), recv_end(0),
@@ -954,7 +959,8 @@ ssize_t AsyncConnection::_process_connection()
         }
         ldout(async_msgr->cct, 20) << __func__ <<  " connect read peer addr "
                              << paddr << " on socket " << cs.fd() << dendl;
-        if (peer_addr != paddr) {
+        if (memcmp(peer_addr.get_sockaddr(), paddr.get_sockaddr(),
+                   peer_addr.get_sockaddr_len())) {
           if (paddr.is_blank_ip() && peer_addr.get_port() == paddr.get_port() &&
               peer_addr.get_nonce() == paddr.get_nonce()) {
             ldout(async_msgr->cct, 0) << __func__ <<  " connect claims to be " << paddr
@@ -1372,6 +1378,1082 @@ fail_registered:
   inject_delay();
 
 fail:
+  return -1;
+}
+
+void AsyncConnection::process_v2() {
+  ssize_t r = 0;
+  int prev_state = state;
+#if defined(WITH_LTTNG) && defined(WITH_EVENTTRACE)
+  utime_t ltt_recv_stamp = ceph_clock_now();
+#endif
+  bool need_dispatch_writer = false;
+  std::lock_guard<std::mutex> l(lock);
+  last_active = ceph::coarse_mono_clock::now();
+  auto recv_start_time = ceph::mono_clock::now();
+  do {
+    ldout(async_msgr->cct, 20) << __func__ << " prev state is " << get_state_name(prev_state) << dendl;
+    prev_state = state;
+    switch (state) {
+      case STATE_OPEN:
+      {
+        char tag = -1;
+        r = read_until(sizeof(tag), &tag);
+        if (r < 0) {
+          ldout(async_msgr->cct, 1) << __func__ << " read tag failed" << dendl;
+          goto fail;
+        } else if (r > 0) {
+          break;
+        }
+
+        if (tag == CEPH_MSGR_TAG_KEEPALIVE) {
+          ldout(async_msgr->cct, 20) << __func__ << " got KEEPALIVE" << dendl;
+          set_last_keepalive(ceph_clock_now());
+        } else if (tag == CEPH_MSGR_TAG_KEEPALIVE2) {
+          state = STATE_OPEN_KEEPALIVE2;
+        } else if (tag == CEPH_MSGR_TAG_KEEPALIVE2_ACK) {
+          state = STATE_OPEN_KEEPALIVE2_ACK;
+        } else if (tag == CEPH_MSGR_TAG_ACK) {
+          state = STATE_OPEN_TAG_ACK;
+        } else if (tag == CEPH_MSGR_TAG_MSG) {
+          state = STATE_OPEN_MESSAGE_HEADER;
+        } else if (tag == CEPH_MSGR_TAG_CLOSE) {
+          state = STATE_OPEN_TAG_CLOSE;
+        } else {
+          ldout(async_msgr->cct, 0) << __func__ << " bad tag " << (int)tag << dendl;
+          goto fail;
+        }
+
+        break;
+      }
+
+      case STATE_OPEN_KEEPALIVE2:
+      {
+        ceph_timespec *t;
+        r = read_until(sizeof(*t), state_buffer);
+        if (r < 0) {
+          ldout(async_msgr->cct, 1) << __func__ << " read keeplive timespec failed" << dendl;
+          goto fail;
+        } else if (r > 0) {
+          break;
+        }
+
+        ldout(async_msgr->cct, 30) << __func__ << " got KEEPALIVE2 tag ..." << dendl;
+        t = (ceph_timespec*)state_buffer;
+        utime_t kp_t = utime_t(*t);
+        write_lock.lock();
+        _append_keepalive_or_ack(true, &kp_t);
+        write_lock.unlock();
+        ldout(async_msgr->cct, 20) << __func__ << " got KEEPALIVE2 " << kp_t << dendl;
+        set_last_keepalive(ceph_clock_now());
+        need_dispatch_writer = true;
+        state = STATE_OPEN;
+        break;
+      }
+
+      case STATE_OPEN_KEEPALIVE2_ACK:
+      {
+        ceph_timespec *t;
+        r = read_until(sizeof(*t), state_buffer);
+        if (r < 0) {
+          ldout(async_msgr->cct, 1) << __func__ << " read keeplive timespec failed" << dendl;
+          goto fail;
+        } else if (r > 0) {
+          break;
+        }
+
+        t = (ceph_timespec*)state_buffer;
+        set_last_keepalive_ack(utime_t(*t));
+        ldout(async_msgr->cct, 20) << __func__ << " got KEEPALIVE_ACK" << dendl;
+        state = STATE_OPEN;
+        break;
+      }
+
+      case STATE_OPEN_TAG_ACK:
+      {
+        ceph_le64 *seq;
+        r = read_until(sizeof(*seq), state_buffer);
+        if (r < 0) {
+          ldout(async_msgr->cct, 1) << __func__ << " read ack seq failed" << dendl;
+          goto fail;
+        } else if (r > 0) {
+          break;
+        }
+
+        seq = (ceph_le64*)state_buffer;
+        ldout(async_msgr->cct, 20) << __func__ << " got ACK" << dendl;
+        handle_ack(*seq);
+        state = STATE_OPEN;
+        break;
+      }
+
+      case STATE_OPEN_MESSAGE_HEADER:
+      {
+#if defined(WITH_LTTNG) && defined(WITH_EVENTTRACE)
+        ltt_recv_stamp = ceph_clock_now();
+#endif
+        recv_stamp = ceph_clock_now();
+        ldout(async_msgr->cct, 20) << __func__ << " begin MSG" << dendl;
+        ceph_msg_header header;
+        ceph_msg_header_old oldheader;
+        __u32 header_crc = 0;
+        unsigned len;
+        if (has_feature(CEPH_FEATURE_NOSRCADDR))
+          len = sizeof(header);
+        else
+          len = sizeof(oldheader);
+
+        r = read_until(len, state_buffer);
+        if (r < 0) {
+          ldout(async_msgr->cct, 1) << __func__ << " read message header failed" << dendl;
+          goto fail;
+        } else if (r > 0) {
+          break;
+        }
+
+        ldout(async_msgr->cct, 20) << __func__ << " got MSG header" << dendl;
+
+        if (has_feature(CEPH_FEATURE_NOSRCADDR)) {
+          header = *((ceph_msg_header*)state_buffer);
+          if (msgr->crcflags & MSG_CRC_HEADER)
+            header_crc = ceph_crc32c(0, (unsigned char *)&header,
+                                     sizeof(header) - sizeof(header.crc));
+        } else {
+          oldheader = *((ceph_msg_header_old*)state_buffer);
+          // this is fugly
+          memcpy(&header, &oldheader, sizeof(header));
+          header.src = oldheader.src.name;
+          header.reserved = oldheader.reserved;
+          if (msgr->crcflags & MSG_CRC_HEADER) {
+            header.crc = oldheader.crc;
+            header_crc = ceph_crc32c(0, (unsigned char *)&oldheader, sizeof(oldheader) - sizeof(oldheader.crc));
+          }
+        }
+
+        ldout(async_msgr->cct, 20) << __func__ << " got envelope type=" << header.type
+                                   << " src " << entity_name_t(header.src)
+                                   << " front=" << header.front_len
+                                   << " data=" << header.data_len
+                                   << " off " << header.data_off << dendl;
+
+        // verify header crc
+        if (msgr->crcflags & MSG_CRC_HEADER && header_crc != header.crc) {
+          ldout(async_msgr->cct,0) << __func__ << " got bad header crc "
+                                   << header_crc << " != " << header.crc << dendl;
+          goto fail;
+        }
+
+        // Reset state
+        data_buf.clear();
+        front.clear();
+        middle.clear();
+        data.clear();
+        current_header = header;
+        state = STATE_OPEN_MESSAGE_THROTTLE_MESSAGE;
+        break;
+      }
+
+      case STATE_OPEN_MESSAGE_THROTTLE_MESSAGE:
+      {
+        if (policy.throttler_messages) {
+          ldout(async_msgr->cct, 10) << __func__ << " wants " << 1 << " message from policy throttler "
+                                     << policy.throttler_messages->get_current() << "/"
+                                     << policy.throttler_messages->get_max() << dendl;
+          if (!policy.throttler_messages->get_or_fail()) {
+            ldout(async_msgr->cct, 10) << __func__ << " wants 1 message from policy throttle "
+                                       << policy.throttler_messages->get_current() << "/"
+                                       << policy.throttler_messages->get_max() << " failed, just wait." << dendl;
+            // following thread pool deal with th full message queue isn't a
+            // short time, so we can wait a ms.
+            if (register_time_events.empty())
+              register_time_events.insert(center->create_time_event(1000, wakeup_handler));
+            break;
+          }
+        }
+
+        state = STATE_OPEN_MESSAGE_THROTTLE_BYTES;
+        break;
+      }
+
+      case STATE_OPEN_MESSAGE_THROTTLE_BYTES:
+      {
+        cur_msg_size = current_header.front_len + current_header.middle_len + current_header.data_len;
+        if (cur_msg_size) {
+          if (policy.throttler_bytes) {
+            ldout(async_msgr->cct, 10) << __func__ << " wants " << cur_msg_size << " bytes from policy throttler "
+                                       << policy.throttler_bytes->get_current() << "/"
+                                       << policy.throttler_bytes->get_max() << dendl;
+            if (!policy.throttler_bytes->get_or_fail(cur_msg_size)) {
+              ldout(async_msgr->cct, 10) << __func__ << " wants " << cur_msg_size << " bytes from policy throttler "
+                                         << policy.throttler_bytes->get_current() << "/"
+                                         << policy.throttler_bytes->get_max() << " failed, just wait." << dendl;
+              // following thread pool deal with th full message queue isn't a
+              // short time, so we can wait a ms.
+              if (register_time_events.empty())
+                register_time_events.insert(center->create_time_event(1000, wakeup_handler));
+              break;
+            }
+          }
+        }
+
+        state = STATE_OPEN_MESSAGE_THROTTLE_DISPATCH_QUEUE;
+        break;
+      }
+
+      case STATE_OPEN_MESSAGE_THROTTLE_DISPATCH_QUEUE:
+      {
+        if (cur_msg_size) {
+          if (!dispatch_queue->dispatch_throttler.get_or_fail(cur_msg_size)) {
+            ldout(async_msgr->cct, 10) << __func__ << " wants " << cur_msg_size << " bytes from dispatch throttle "
+                                       << dispatch_queue->dispatch_throttler.get_current() << "/"
+                                       << dispatch_queue->dispatch_throttler.get_max() << " failed, just wait." << dendl;
+            // following thread pool deal with th full message queue isn't a
+            // short time, so we can wait a ms.
+            if (register_time_events.empty())
+              register_time_events.insert(center->create_time_event(1000, wakeup_handler));
+            break;
+          }
+        }
+
+        throttle_stamp = ceph_clock_now();
+        state = STATE_OPEN_MESSAGE_READ_FRONT;
+        break;
+      }
+
+      case STATE_OPEN_MESSAGE_READ_FRONT:
+      {
+        // read front
+        unsigned front_len = current_header.front_len;
+        if (front_len) {
+          if (!front.length())
+            front.push_back(buffer::create(front_len));
+
+          r = read_until(front_len, front.c_str());
+          if (r < 0) {
+            ldout(async_msgr->cct, 1) << __func__ << " read message front failed" << dendl;
+            goto fail;
+          } else if (r > 0) {
+            break;
+          }
+
+          ldout(async_msgr->cct, 20) << __func__ << " got front " << front.length() << dendl;
+        }
+        state = STATE_OPEN_MESSAGE_READ_MIDDLE;
+      }
+
+      case STATE_OPEN_MESSAGE_READ_MIDDLE:
+      {
+        // read middle
+        unsigned middle_len = current_header.middle_len;
+        if (middle_len) {
+          if (!middle.length())
+            middle.push_back(buffer::create(middle_len));
+
+          r = read_until(middle_len, middle.c_str());
+          if (r < 0) {
+            ldout(async_msgr->cct, 1) << __func__ << " read message middle failed" << dendl;
+            goto fail;
+          } else if (r > 0) {
+            break;
+          }
+          ldout(async_msgr->cct, 20) << __func__ << " got middle " << middle.length() << dendl;
+        }
+
+        state = STATE_OPEN_MESSAGE_READ_DATA_PREPARE;
+      }
+
+      case STATE_OPEN_MESSAGE_READ_DATA_PREPARE:
+      {
+        // read data
+        unsigned data_len = le32_to_cpu(current_header.data_len);
+        unsigned data_off = le32_to_cpu(current_header.data_off);
+        if (data_len) {
+          // get a buffer
+          map<ceph_tid_t,pair<bufferlist,int> >::iterator p = rx_buffers.find(current_header.tid);
+          if (p != rx_buffers.end()) {
+            ldout(async_msgr->cct,10) << __func__ << " seleting rx buffer v " << p->second.second
+                                      << " at offset " << data_off
+                                      << " len " << p->second.first.length() << dendl;
+            data_buf = p->second.first;
+            // make sure it's big enough
+            if (data_buf.length() < data_len)
+              data_buf.push_back(buffer::create(data_len - data_buf.length()));
+            data_blp = data_buf.begin();
+          } else {
+            ldout(async_msgr->cct,20) << __func__ << " allocating new rx buffer at offset " << data_off << dendl;
+            alloc_aligned_buffer(data_buf, data_len, data_off);
+            data_blp = data_buf.begin();
+          }
+        }
+
+        msg_left = data_len;
+        state = STATE_OPEN_MESSAGE_READ_DATA;
+      }
+
+      case STATE_OPEN_MESSAGE_READ_DATA:
+      {
+        while (msg_left > 0) {
+          bufferptr bp = data_blp.get_current_ptr();
+          unsigned read = MIN(bp.length(), msg_left);
+          r = read_until(read, bp.c_str());
+          if (r < 0) {
+            ldout(async_msgr->cct, 1) << __func__ << " read data error " << dendl;
+            goto fail;
+          } else if (r > 0) {
+            break;
+          }
+
+          data_blp.advance(read);
+          data.append(bp, 0, read);
+          msg_left -= read;
+        }
+
+        if (msg_left > 0)
+          break;
+
+        state = STATE_OPEN_MESSAGE_READ_FOOTER_AND_DISPATCH;
+      }
+
+      case STATE_OPEN_MESSAGE_READ_FOOTER_AND_DISPATCH:
+      {
+        ceph_msg_footer footer;
+        ceph_msg_footer_old old_footer;
+        unsigned len;
+        // footer
+        if (has_feature(CEPH_FEATURE_MSG_AUTH))
+          len = sizeof(footer);
+        else
+          len = sizeof(old_footer);
+
+        r = read_until(len, state_buffer);
+        if (r < 0) {
+          ldout(async_msgr->cct, 1) << __func__ << " read footer data error " << dendl;
+          goto fail;
+        } else if (r > 0) {
+          break;
+        }
+
+        if (has_feature(CEPH_FEATURE_MSG_AUTH)) {
+          footer = *((ceph_msg_footer*)state_buffer);
+        } else {
+          old_footer = *((ceph_msg_footer_old*)state_buffer);
+          footer.front_crc = old_footer.front_crc;
+          footer.middle_crc = old_footer.middle_crc;
+          footer.data_crc = old_footer.data_crc;
+          footer.sig = 0;
+          footer.flags = old_footer.flags;
+        }
+        int aborted = (footer.flags & CEPH_MSG_FOOTER_COMPLETE) == 0;
+        ldout(async_msgr->cct, 10) << __func__ << " aborted = " << aborted << dendl;
+        if (aborted) {
+          ldout(async_msgr->cct, 0) << __func__ << " got " << front.length() << " + " << middle.length() << " + " << data.length()
+                                    << " byte message.. ABORTED" << dendl;
+          goto fail;
+        }
+
+        ldout(async_msgr->cct, 20) << __func__ << " got " << front.length() << " + " << middle.length()
+                                   << " + " << data.length() << " byte message" << dendl;
+        Message *message = decode_message(async_msgr->cct, async_msgr->crcflags, current_header, footer,
+                                          front, middle, data, this);
+        if (!message) {
+          ldout(async_msgr->cct, 1) << __func__ << " decode message failed " << dendl;
+          goto fail;
+        }
+
+        //
+        //  Check the signature if one should be present.  A zero return indicates success. PLR
+        //
+
+        if (session_security.get() == NULL) {
+          ldout(async_msgr->cct, 10) << __func__ << " no session security set" << dendl;
+        } else {
+          if (session_security->check_message_signature(message)) {
+            ldout(async_msgr->cct, 0) << __func__ << " Signature check failed" << dendl;
+            message->put();
+            goto fail;
+          }
+        }
+        message->set_byte_throttler(policy.throttler_bytes);
+        message->set_message_throttler(policy.throttler_messages);
+
+        // store reservation size in message, so we don't get confused
+        // by messages entering the dispatch queue through other paths.
+        message->set_dispatch_throttle_size(cur_msg_size);
+
+        message->set_recv_stamp(recv_stamp);
+        message->set_throttle_stamp(throttle_stamp);
+        message->set_recv_complete_stamp(ceph_clock_now());
+
+        // check received seq#.  if it is old, drop the message.
+        // note that incoming messages may skip ahead.  this is convenient for the client
+        // side queueing because messages can't be renumbered, but the (kernel) client will
+        // occasionally pull a message out of the sent queue to send elsewhere.  in that case
+        // it doesn't matter if we "got" it or not.
+        uint64_t cur_seq = in_seq;
+        if (message->get_seq() <= cur_seq) {
+          ldout(async_msgr->cct,0) << __func__ << " got old message "
+                                   << message->get_seq() << " <= " << cur_seq << " " << message << " " << *message
+                                   << ", discarding" << dendl;
+          message->put();
+          if (has_feature(CEPH_FEATURE_RECONNECT_SEQ) && async_msgr->cct->_conf->ms_die_on_old_message)
+            assert(0 == "old msgs despite reconnect_seq feature");
+          break;
+        }
+        if (message->get_seq() > cur_seq + 1) {
+          ldout(async_msgr->cct, 0) << __func__ << " missed message?  skipped from seq "
+                                    << cur_seq << " to " << message->get_seq() << dendl;
+          if (async_msgr->cct->_conf->ms_die_on_skipped_message)
+            assert(0 == "skipped incoming seq");
+        }
+
+        message->set_connection(this);
+
+#if defined(WITH_LTTNG) && defined(WITH_EVENTTRACE)
+        if (message->get_type() == CEPH_MSG_OSD_OP || message->get_type() == CEPH_MSG_OSD_OPREPLY) {
+            utime_t ltt_processed_stamp = ceph_clock_now();
+            double usecs_elapsed = (ltt_processed_stamp.to_nsec()-ltt_recv_stamp.to_nsec())/1000;
+            ostringstream buf;
+            if (message->get_type() == CEPH_MSG_OSD_OP)
+              OID_ELAPSED_WITH_MSG(message, usecs_elapsed, "TIME_TO_DECODE_OSD_OP", false);
+            else
+              OID_ELAPSED_WITH_MSG(message, usecs_elapsed, "TIME_TO_DECODE_OSD_OPREPLY", false);
+          }
+#endif
+
+        // note last received message.
+        in_seq = message->get_seq();
+        ldout(async_msgr->cct, 5) << " rx " << message->get_source() << " seq "
+                                  << message->get_seq() << " " << message
+                                  << " " << *message << dendl;
+
+        if (!policy.lossy) {
+          ack_left++;
+          need_dispatch_writer = true;
+        }
+        state = STATE_OPEN;
+
+        logger->inc(l_msgr_recv_messages);
+        logger->inc(l_msgr_recv_bytes, cur_msg_size + sizeof(ceph_msg_header) + sizeof(ceph_msg_footer));
+
+        async_msgr->ms_fast_preprocess(message);
+        auto fast_dispatch_time = ceph::mono_clock::now();
+        logger->tinc(l_msgr_running_recv_time, fast_dispatch_time - recv_start_time);
+        if (delay_state) {
+          utime_t release = message->get_recv_stamp();
+          double delay_period = 0;
+          if (rand() % 10000 < async_msgr->cct->_conf->ms_inject_delay_probability * 10000.0) {
+            delay_period = async_msgr->cct->_conf->ms_inject_delay_max * (double)(rand() % 10000) / 10000.0;
+            release += delay_period;
+            ldout(async_msgr->cct, 1) << "queue_received will delay until " << release << " on "
+                                      << message << " " << *message << dendl;
+          }
+          delay_state->queue(delay_period, release, message);
+        } else if (async_msgr->ms_can_fast_dispatch(message)) {
+          lock.unlock();
+          dispatch_queue->fast_dispatch(message);
+          recv_start_time = ceph::mono_clock::now();
+          logger->tinc(l_msgr_running_fast_dispatch_time,
+                       recv_start_time - fast_dispatch_time);
+          lock.lock();
+        } else {
+          dispatch_queue->enqueue(message, message->get_priority(), conn_id);
+        }
+
+        break;
+      }
+
+      case STATE_OPEN_TAG_CLOSE:
+      {
+        ldout(async_msgr->cct, 20) << __func__ << " got CLOSE" << dendl;
+        _stop();
+        return ;
+      }
+
+      case STATE_STANDBY:
+      {
+        ldout(async_msgr->cct, 20) << __func__ << " enter STANDY" << dendl;
+
+        break;
+      }
+
+      case STATE_NONE:
+      {
+        ldout(async_msgr->cct, 20) << __func__ << " enter none state" << dendl;
+        break;
+      }
+
+      case STATE_CLOSED:
+      {
+        ldout(async_msgr->cct, 20) << __func__ << " socket closed" << dendl;
+        break;
+      }
+
+      case STATE_WAIT:
+      {
+        ldout(async_msgr->cct, 1) << __func__ << " enter wait state, failing" << dendl;
+        goto fail;
+      }
+
+      default:
+      {
+        if (_process_connection() < 0)
+          goto fail;
+        break;
+      }
+    }
+  } while (prev_state != state);
+
+  if (need_dispatch_writer && is_connected())
+    center->dispatch_event_external(write_handler);
+
+  logger->tinc(l_msgr_running_recv_time, ceph::mono_clock::now() - recv_start_time);
+  return;
+
+  fail:
+  fault();
+}
+
+ssize_t AsyncConnection::_process_connection_v2() {
+  ssize_t r = 0;
+
+  switch(state) {
+    case STATE_WAIT_SEND:
+    {
+      std::lock_guard<std::mutex> l(write_lock);
+      if (!outcoming_bl.length()) {
+        assert(state_after_send);
+        state = state_after_send;
+        state_after_send = STATE_NONE;
+      }
+      break;
+    }
+
+    case STATE_CONNECTING:
+    {
+      assert(!policy.server);
+
+      // reset connect state variables
+      got_bad_auth = false;
+      delete authorizer;
+      authorizer = NULL;
+      authorizer_buf.clear();
+      memset(&connect_msg, 0, sizeof(connect_msg));
+      memset(&connect_reply, 0, sizeof(connect_reply));
+
+      global_seq = async_msgr->get_global_seq();
+      // close old socket.  this is safe because we stopped the reader thread above.
+      if (cs) {
+        center->delete_file_event(cs.fd(), EVENT_READABLE|EVENT_WRITABLE);
+        cs.close();
+      }
+
+      SocketOptions opts;
+      opts.priority = async_msgr->get_socket_priority();
+      opts.connect_bind_addr = msgr->get_myaddr();
+      r = worker->connect(get_peer_addr(), opts, &cs);
+      if (r < 0)
+        goto fail;
+
+      center->create_file_event(cs.fd(), EVENT_READABLE, read_handler);
+      state = STATE_CONNECTING_RE;
+      break;
+    }
+
+    case STATE_CONNECTING_RE:
+    {
+      r = cs.is_connected();
+      if (r < 0) {
+        ldout(async_msgr->cct, 1) << __func__ << " reconnect failed " << dendl;
+        if (r == -ECONNREFUSED) {
+          ldout(async_msgr->cct, 2) << __func__ << " connection refused!" << dendl;
+          dispatch_queue->queue_refused(this);
+        }
+        goto fail;
+      } else if (r == 0) {
+        ldout(async_msgr->cct, 10) << __func__ << " nonblock connect inprogress" << dendl;
+        if (async_msgr->get_stack()->nonblock_connect_need_writable_event())
+          center->create_file_event(cs.fd(), EVENT_WRITABLE, read_handler);
+        break;
+      }
+
+      center->delete_file_event(cs.fd(), EVENT_WRITABLE);
+      ldout(async_msgr->cct, 10) << __func__ << " connect successfully, ready to send banner" << dendl;
+
+      bufferlist bl;
+      bl.append(CEPH_BANNER, strlen(CEPH_BANNER));
+      r = try_send(bl);
+      if (r == 0) {
+        state = STATE_CONNECTING_WAIT_BANNER_AND_IDENTIFY;
+        ldout(async_msgr->cct, 10) << __func__ << " connect write banner done: "
+                                   << get_peer_addr() << dendl;
+      } else if (r > 0) {
+        state = STATE_WAIT_SEND;
+        state_after_send = STATE_CONNECTING_WAIT_BANNER_AND_IDENTIFY;
+        ldout(async_msgr->cct, 10) << __func__ << " connect wait for write banner: "
+                                   << get_peer_addr() << dendl;
+      } else {
+        goto fail;
+      }
+
+      break;
+    }
+
+    case STATE_CONNECTING_WAIT_BANNER_AND_IDENTIFY:
+    {
+      entity_addr_t paddr, peer_addr_for_me;
+      bufferlist myaddrbl;
+      unsigned banner_len = strlen(CEPH_BANNER);
+      unsigned need_len = banner_len + sizeof(ceph_entity_addr)*2;
+      r = read_until(need_len, state_buffer);
+      if (r < 0) {
+        ldout(async_msgr->cct, 1) << __func__ << " read banner and identify addresses failed" << dendl;
+        goto fail;
+      } else if (r > 0) {
+        break;
+      }
+
+      if (memcmp(state_buffer, CEPH_BANNER, banner_len)) {
+        ldout(async_msgr->cct, 0) << __func__ << " connect protocol error (bad banner) on peer "
+                                  << get_peer_addr() << dendl;
+        goto fail;
+      }
+
+      bufferlist bl;
+      bl.append(state_buffer+banner_len, sizeof(ceph_entity_addr)*2);
+      bufferlist::iterator p = bl.begin();
+      try {
+        ::decode(paddr, p);
+        ::decode(peer_addr_for_me, p);
+      } catch (const buffer::error& e) {
+        lderr(async_msgr->cct) << __func__ <<  " decode peer addr failed " << dendl;
+        goto fail;
+      }
+      ldout(async_msgr->cct, 20) << __func__ <<  " connect read peer addr "
+                                 << paddr << " on socket " << cs.fd() << dendl;
+      if (memcmp(peer_addr.get_sockaddr(), paddr.get_sockaddr(),
+                 peer_addr.get_sockaddr_len())) {
+        if (paddr.is_blank_ip() && peer_addr.get_port() == paddr.get_port() &&
+            peer_addr.get_nonce() == paddr.get_nonce()) {
+          ldout(async_msgr->cct, 0) << __func__ <<  " connect claims to be " << paddr
+                                    << " not " << peer_addr
+                                    << " - presumably this is the same node!" << dendl;
+        } else {
+          ldout(async_msgr->cct, 10) << __func__ << " connect claims to be "
+                                     << paddr << " not " << peer_addr << dendl;
+          goto fail;
+        }
+      }
+
+      ldout(async_msgr->cct, 20) << __func__ << " connect peer addr for me is " << peer_addr_for_me << dendl;
+      lock.unlock();
+      async_msgr->learned_addr(peer_addr_for_me);
+      if (async_msgr->cct->_conf->ms_inject_internal_delays) {
+        if (rand() % async_msgr->cct->_conf->ms_inject_socket_failures == 0) {
+          ldout(msgr->cct, 10) << __func__ << " sleep for "
+                               << async_msgr->cct->_conf->ms_inject_internal_delays << dendl;
+          utime_t t;
+          t.set_from_double(async_msgr->cct->_conf->ms_inject_internal_delays);
+          t.sleep();
+        }
+      }
+
+      lock.lock();
+      if (state != STATE_CONNECTING_WAIT_BANNER_AND_IDENTIFY) {
+        ldout(async_msgr->cct, 1) << __func__ << " state changed while learned_addr, mark_down or "
+                                  << " replacing must be happened just now" << dendl;
+        return 0;
+      }
+
+      ::encode(async_msgr->get_myaddr(), myaddrbl, 0); // legacy
+      r = try_send(myaddrbl);
+      if (r == 0) {
+        state = STATE_CONNECTING_SEND_CONNECT_MSG;
+        ldout(async_msgr->cct, 10) << __func__ << " connect sent my addr "
+                                   << async_msgr->get_myaddr() << dendl;
+      } else if (r > 0) {
+        state = STATE_WAIT_SEND;
+        state_after_send = STATE_CONNECTING_SEND_CONNECT_MSG;
+        ldout(async_msgr->cct, 10) << __func__ << " connect send my addr done: "
+                                   << async_msgr->get_myaddr() << dendl;
+      } else {
+        ldout(async_msgr->cct, 2) << __func__ << " connect couldn't write my addr, "
+                                  << cpp_strerror(r) << dendl;
+        goto fail;
+      }
+
+      break;
+    }
+
+    case STATE_CONNECTING_SEND_CONNECT_MSG:
+    {
+      if (!got_bad_auth) {
+        delete authorizer;
+        authorizer = async_msgr->get_authorizer(peer_type, false);
+      }
+      bufferlist bl;
+
+      connect_msg.features = policy.features_supported;
+      connect_msg.host_type = async_msgr->get_myinst().name.type();
+      connect_msg.global_seq = global_seq;
+      connect_msg.connect_seq = connect_seq;
+      connect_msg.protocol_version = async_msgr->get_proto_version(peer_type, true);
+      connect_msg.authorizer_protocol = authorizer ? authorizer->protocol : 0;
+      connect_msg.authorizer_len = authorizer ? authorizer->bl.length() : 0;
+      if (authorizer)
+        ldout(async_msgr->cct, 10) << __func__ <<  " connect_msg.authorizer_len="
+                                   << connect_msg.authorizer_len << " protocol="
+                                   << connect_msg.authorizer_protocol << dendl;
+      connect_msg.flags = 0;
+      if (policy.lossy)
+        connect_msg.flags |= CEPH_MSG_CONNECT_LOSSY;  // this is fyi, actually, server decides!
+      bl.append((char*)&connect_msg, sizeof(connect_msg));
+      if (authorizer) {
+        bl.append(authorizer->bl.c_str(), authorizer->bl.length());
+      }
+      ldout(async_msgr->cct, 10) << __func__ << " connect sending gseq=" << global_seq << " cseq="
+                                 << connect_seq << " proto=" << connect_msg.protocol_version << dendl;
+
+      r = try_send(bl);
+      if (r == 0) {
+        state = STATE_CONNECTING_WAIT_CONNECT_REPLY;
+        ldout(async_msgr->cct,20) << __func__ << " connect wrote (self +) cseq, waiting for reply" << dendl;
+      } else if (r > 0) {
+        state = STATE_WAIT_SEND;
+        state_after_send = STATE_CONNECTING_WAIT_CONNECT_REPLY;
+        ldout(async_msgr->cct, 10) << __func__ << " continue send reply " << dendl;
+      } else {
+        ldout(async_msgr->cct, 2) << __func__ << " connect couldn't send reply "
+                                  << cpp_strerror(r) << dendl;
+        goto fail;
+      }
+
+      break;
+    }
+
+    case STATE_CONNECTING_WAIT_CONNECT_REPLY:
+    {
+      r = read_until(sizeof(connect_reply), state_buffer);
+      if (r < 0) {
+        ldout(async_msgr->cct, 1) << __func__ << " read connect reply failed" << dendl;
+        goto fail;
+      } else if (r > 0) {
+        break;
+      }
+
+      connect_reply = *((ceph_msg_connect_reply*)state_buffer);
+
+      ldout(async_msgr->cct, 20) << __func__ << " connect got reply tag " << (int)connect_reply.tag
+                                 << " connect_seq " << connect_reply.connect_seq << " global_seq "
+                                 << connect_reply.global_seq << " proto " << connect_reply.protocol_version
+                                 << " flags " << (int)connect_reply.flags << " features "
+                                 << connect_reply.features << dendl;
+      state = STATE_CONNECTING_WAIT_CONNECT_REPLY_AUTH;
+
+      break;
+    }
+
+    case STATE_CONNECTING_WAIT_CONNECT_REPLY_AUTH:
+    {
+      bufferlist authorizer_reply;
+      if (connect_reply.authorizer_len) {
+        ldout(async_msgr->cct, 10) << __func__ << " reply.authorizer_len=" << connect_reply.authorizer_len << dendl;
+        assert(connect_reply.authorizer_len < 4096);
+        r = read_until(connect_reply.authorizer_len, state_buffer);
+        if (r < 0) {
+          ldout(async_msgr->cct, 1) << __func__ << " read connect reply authorizer failed" << dendl;
+          goto fail;
+        } else if (r > 0) {
+          break;
+        }
+
+        authorizer_reply.append(state_buffer, connect_reply.authorizer_len);
+        bufferlist::iterator iter = authorizer_reply.begin();
+        if (authorizer && !authorizer->verify_reply(iter)) {
+          ldout(async_msgr->cct, 0) << __func__ << " failed verifying authorize reply" << dendl;
+          goto fail;
+        }
+      }
+      r = handle_connect_reply(connect_msg, connect_reply);
+      if (r < 0)
+        goto fail;
+
+      // state must be changed!
+      assert(state != STATE_CONNECTING_WAIT_CONNECT_REPLY_AUTH);
+      break;
+    }
+
+    case STATE_CONNECTING_WAIT_ACK_SEQ:
+    {
+      uint64_t newly_acked_seq = 0;
+
+      r = read_until(sizeof(newly_acked_seq), state_buffer);
+      if (r < 0) {
+        ldout(async_msgr->cct, 1) << __func__ << " read connect ack seq failed" << dendl;
+        goto fail;
+      } else if (r > 0) {
+        break;
+      }
+
+      newly_acked_seq = *((uint64_t*)state_buffer);
+      ldout(async_msgr->cct, 2) << __func__ << " got newly_acked_seq " << newly_acked_seq
+                                << " vs out_seq " << out_seq << dendl;
+      discard_requeued_up_to(newly_acked_seq);
+      //while (newly_acked_seq > out_seq.read()) {
+      //  Message *m = _get_next_outgoing(NULL);
+      //  assert(m);
+      //  ldout(async_msgr->cct, 2) << __func__ << " discarding previously sent " << m->get_seq()
+      //                      << " " << *m << dendl;
+      //  assert(m->get_seq() <= newly_acked_seq);
+      //  m->put();
+      //  out_seq.inc();
+      //}
+
+      bufferlist bl;
+      uint64_t s = in_seq;
+      bl.append((char*)&s, sizeof(s));
+      r = try_send(bl);
+      if (r == 0) {
+        state = STATE_CONNECTING_READY;
+        ldout(async_msgr->cct, 10) << __func__ << " send in_seq done " << dendl;
+      } else if (r > 0) {
+        state_after_send = STATE_CONNECTING_READY;
+        state = STATE_WAIT_SEND;
+        ldout(async_msgr->cct, 10) << __func__ << " continue send in_seq " << dendl;
+      } else {
+        goto fail;
+      }
+      break;
+    }
+
+    case STATE_CONNECTING_READY:
+    {
+      // hooray!
+      peer_global_seq = connect_reply.global_seq;
+      policy.lossy = connect_reply.flags & CEPH_MSG_CONNECT_LOSSY;
+      state = STATE_OPEN;
+      once_ready = true;
+      connect_seq += 1;
+      assert(connect_seq == connect_reply.connect_seq);
+      backoff = utime_t();
+      set_features((uint64_t)connect_reply.features & (uint64_t)connect_msg.features);
+      ldout(async_msgr->cct, 10) << __func__ << " connect success " << connect_seq
+                                 << ", lossy = " << policy.lossy << ", features "
+                                 << get_features() << dendl;
+
+      // If we have an authorizer, get a new AuthSessionHandler to deal with ongoing security of the
+      // connection.  PLR
+      if (authorizer != NULL) {
+        session_security.reset(
+            get_auth_session_handler(async_msgr->cct,
+                                     authorizer->protocol,
+                                     authorizer->session_key,
+                                     get_features()));
+      } else {
+        // We have no authorizer, so we shouldn't be applying security to messages in this AsyncConnection.  PLR
+        session_security.reset();
+      }
+
+      if (delay_state)
+        assert(delay_state->ready());
+      dispatch_queue->queue_connect(this);
+      async_msgr->ms_deliver_handle_fast_connect(this);
+
+      // make sure no pending tick timer
+      if (last_tick_id)
+        center->delete_time_event(last_tick_id);
+      last_tick_id = center->create_time_event(inactive_timeout_us, tick_handler);
+
+      // message may in queue between last _try_send and connection ready
+      // write event may already notify and we need to force scheduler again
+      write_lock.lock();
+      can_write = WriteStatus::CANWRITE;
+      if (is_queued())
+        center->dispatch_event_external(write_handler);
+      write_lock.unlock();
+      maybe_start_delay_thread();
+      break;
+    }
+
+    case STATE_ACCEPTING:
+    {
+      bufferlist bl;
+      center->create_file_event(cs.fd(), EVENT_READABLE, read_handler);
+
+      size_t banner_len = strlen(CEPH_BANNER_PREFIX) + sizeof(__u32)
+                                                     + sizeof(__u32);
+      char banner[banner_len];
+      memcpy(banner, CEPH_BANNER_PREFIX, strlen(CEPH_BANNER_PREFIX));
+
+      bl.append(banner, banner_len);
+
+      ::encode(async_msgr->get_myaddr(), bl, 0); // legacy
+      port = async_msgr->get_myaddr().get_port();
+      ::encode(socket_addr, bl, 0); // legacy
+      ldout(async_msgr->cct, 1) << __func__ << " sd=" << cs.fd() << " " << socket_addr << dendl;
+
+      r = try_send(bl);
+      if (r == 0) {
+        state = STATE_ACCEPTING_WAIT_BANNER_ADDR;
+        ldout(async_msgr->cct, 10) << __func__ << " write banner and addr done: "
+                                   << get_peer_addr() << dendl;
+      } else if (r > 0) {
+        state = STATE_WAIT_SEND;
+        state_after_send = STATE_ACCEPTING_WAIT_BANNER_ADDR;
+        ldout(async_msgr->cct, 10) << __func__ << " wait for write banner and addr: "
+                                   << get_peer_addr() << dendl;
+      } else {
+        goto fail;
+      }
+
+      break;
+    }
+    case STATE_ACCEPTING_WAIT_BANNER_ADDR:
+    {
+      bufferlist addr_bl;
+      entity_addr_t peer_addr;
+
+      r = read_until(strlen(CEPH_BANNER) + sizeof(ceph_entity_addr), state_buffer);
+      if (r < 0) {
+        ldout(async_msgr->cct, 1) << __func__ << " read peer banner and addr failed" << dendl;
+        goto fail;
+      } else if (r > 0) {
+        break;
+      }
+
+      if (memcmp(state_buffer, CEPH_BANNER, strlen(CEPH_BANNER))) {
+        ldout(async_msgr->cct, 1) << __func__ << " accept peer sent bad banner '" << state_buffer
+                                  << "' (should be '" << CEPH_BANNER << "')" << dendl;
+        goto fail;
+      }
+
+      addr_bl.append(state_buffer+strlen(CEPH_BANNER), sizeof(ceph_entity_addr));
+      try {
+        bufferlist::iterator ti = addr_bl.begin();
+        ::decode(peer_addr, ti);
+      } catch (const buffer::error& e) {
+        lderr(async_msgr->cct) << __func__ <<  " decode peer_addr failed " << dendl;
+        goto fail;
+      }
+
+      ldout(async_msgr->cct, 10) << __func__ << " accept peer addr is " << peer_addr << dendl;
+      if (peer_addr.is_blank_ip()) {
+        // peer apparently doesn't know what ip they have; figure it out for them.
+        int port = peer_addr.get_port();
+        peer_addr.u = socket_addr.u;
+        peer_addr.set_port(port);
+        ldout(async_msgr->cct, 0) << __func__ << " accept peer addr is really " << peer_addr
+                                  << " (socket is " << socket_addr << ")" << dendl;
+      }
+      set_peer_addr(peer_addr);  // so that connection_state gets set up
+      state = STATE_ACCEPTING_WAIT_CONNECT_MSG;
+      break;
+    }
+
+    case STATE_ACCEPTING_WAIT_CONNECT_MSG:
+    {
+      r = read_until(sizeof(connect_msg), state_buffer);
+      if (r < 0) {
+        ldout(async_msgr->cct, 1) << __func__ << " read connect msg failed" << dendl;
+        goto fail;
+      } else if (r > 0) {
+        break;
+      }
+
+      connect_msg = *((ceph_msg_connect*)state_buffer);
+      state = STATE_ACCEPTING_WAIT_CONNECT_MSG_AUTH;
+      break;
+    }
+
+    case STATE_ACCEPTING_WAIT_CONNECT_MSG_AUTH:
+    {
+      bufferlist authorizer_reply;
+
+      if (connect_msg.authorizer_len) {
+        if (!authorizer_buf.length())
+          authorizer_buf.push_back(buffer::create(connect_msg.authorizer_len));
+
+        r = read_until(connect_msg.authorizer_len, authorizer_buf.c_str());
+        if (r < 0) {
+          ldout(async_msgr->cct, 1) << __func__ << " read connect authorizer failed" << dendl;
+          goto fail;
+        } else if (r > 0) {
+          break;
+        }
+      }
+
+      ldout(async_msgr->cct, 20) << __func__ << " accept got peer connect_seq "
+                                 << connect_msg.connect_seq << " global_seq "
+                                 << connect_msg.global_seq << dendl;
+      set_peer_type(connect_msg.host_type);
+      policy = async_msgr->get_policy(connect_msg.host_type);
+      ldout(async_msgr->cct, 10) << __func__ << " accept of host_type " << connect_msg.host_type
+                                 << ", policy.lossy=" << policy.lossy << " policy.server="
+                                 << policy.server << " policy.standby=" << policy.standby
+                                 << " policy.resetcheck=" << policy.resetcheck << dendl;
+
+      r = handle_connect_msg(connect_msg, authorizer_buf, authorizer_reply);
+      if (r < 0)
+        goto fail;
+
+      // state is changed by "handle_connect_msg"
+      assert(state != STATE_ACCEPTING_WAIT_CONNECT_MSG_AUTH);
+      break;
+    }
+
+    case STATE_ACCEPTING_WAIT_SEQ:
+    {
+      uint64_t newly_acked_seq;
+      r = read_until(sizeof(newly_acked_seq), state_buffer);
+      if (r < 0) {
+        ldout(async_msgr->cct, 1) << __func__ << " read ack seq failed" << dendl;
+        goto fail_registered;
+      } else if (r > 0) {
+        break;
+      }
+
+      newly_acked_seq = *((uint64_t*)state_buffer);
+      ldout(async_msgr->cct, 2) << __func__ << " accept get newly_acked_seq " << newly_acked_seq << dendl;
+      discard_requeued_up_to(newly_acked_seq);
+      state = STATE_ACCEPTING_READY;
+      break;
+    }
+
+    case STATE_ACCEPTING_READY:
+    {
+      ldout(async_msgr->cct, 20) << __func__ << " accept done" << dendl;
+      state = STATE_OPEN;
+      memset(&connect_msg, 0, sizeof(connect_msg));
+
+      if (delay_state)
+        assert(delay_state->ready());
+      // make sure no pending tick timer
+      if (last_tick_id)
+        center->delete_time_event(last_tick_id);
+      last_tick_id = center->create_time_event(inactive_timeout_us, tick_handler);
+
+      write_lock.lock();
+      can_write = WriteStatus::CANWRITE;
+      if (is_queued())
+        center->dispatch_event_external(write_handler);
+      write_lock.unlock();
+      maybe_start_delay_thread();
+      break;
+    }
+
+    default:
+    {
+      lderr(async_msgr->cct) << __func__ << " bad state: " << state << dendl;
+      ceph_abort();
+    }
+  }
+
+  return 0;
+
+  fail_registered:
+  ldout(async_msgr->cct, 10) << "accept fault after register" << dendl;
+  inject_delay();
+
+  fail:
   return -1;
 }
 

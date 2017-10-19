@@ -82,8 +82,8 @@ public:
    * _nonce A unique ID to use for this AsyncMessenger. It should not
    * be a value that will be repeated if the daemon restarts.
    */
-  AsyncMessenger(CephContext *cct, entity_name_t name, const std::string &type,
-                 string mname, uint64_t _nonce);
+  AsyncMessenger(CephContext *cct, entity_name_t name, msg_protocol_t protocol,
+                 const std::string &type, string mname, uint64_t _nonce);
 
   /**
    * Destroy the AsyncMessenger. Pretty simple since all the work is done

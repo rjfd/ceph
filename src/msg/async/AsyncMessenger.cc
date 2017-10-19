@@ -86,7 +86,11 @@ int Processor::bind(const entity_addr_t &bind_addr,
   // use whatever user specified (if anything)
   entity_addr_t listen_addr = bind_addr;
   if (listen_addr.get_type() == entity_addr_t::TYPE_NONE) {
-    listen_addr.set_type(entity_addr_t::TYPE_LEGACY);
+    if (msgr->is_protocol_v2()) {
+      listen_addr.set_type(entity_addr_t::TYPE_MSGR2);
+    } else {
+      listen_addr.set_type(entity_addr_t::TYPE_LEGACY);
+    }
   }
   listen_addr.set_family(family);
 
@@ -245,8 +249,9 @@ class C_handle_reap : public EventCallback {
  */
 
 AsyncMessenger::AsyncMessenger(CephContext *cct, entity_name_t name,
-                               const std::string &type, string mname, uint64_t _nonce)
-  : SimplePolicyMessenger(cct, name,mname, _nonce),
+                               msg_protocol_t protocol, const std::string &type,
+                               string mname, uint64_t _nonce)
+  : SimplePolicyMessenger(cct, name, protocol, mname, _nonce),
     dispatch_queue(cct, this, mname),
     lock("AsyncMessenger::lock"),
     nonce(_nonce), need_addr(true), did_bind(false),

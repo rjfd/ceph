@@ -46,6 +46,7 @@ int main(int argc, const char **argv)
 
 	std::string addr = "localhost";
 	std::string port = "1234";
+	std::string prot = "v1";
 
 	cout << "Simple Server starting..." << endl;
 
@@ -56,22 +57,28 @@ int main(int argc, const char **argv)
 			       CODE_ENVIRONMENT_DAEMON,
 			       0);
 
-	for (arg_iter = args.begin(); arg_iter != args.end();) {
-	  if (ceph_argparse_witharg(args, arg_iter, &val, "--addr",
-				    (char*) NULL)) {
-	    addr = val;
-	  } else if (ceph_argparse_witharg(args, arg_iter, &val, "--port",
-				    (char*) NULL)) {
-	    port = val;
-	  } else {
-	    ++arg_iter;
-	  }
-	};
+    for (arg_iter = args.begin(); arg_iter != args.end();) {
+        if (ceph_argparse_witharg(args, arg_iter, &val, "--addr",
+                                  (char*) NULL)) {
+            addr = val;
+        } else if (ceph_argparse_witharg(args, arg_iter, &val, "--port",
+                                         (char*) NULL)) {
+            port = val;
+        } else if (ceph_argparse_witharg(args, arg_iter, &val, "--prot",
+                                         (char*) NULL)) {
+            prot = val;
+        } else {
+            ++arg_iter;
+        }
+    }
 
 	string dest_str = "tcp://";
 	dest_str += addr;
 	dest_str += ":";
 	dest_str += port;
+	if (prot == "v2") {
+		bind_addr = entity_addr_t(entity_addr_t::TYPE_MSGR2);
+	}
 	entity_addr_from_url(&bind_addr, dest_str.c_str());
 
 	messenger = Messenger::create(g_ceph_context, g_conf->get_val<std::string>("ms_type"),

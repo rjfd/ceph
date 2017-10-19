@@ -38,6 +38,13 @@ class Timer;
 
 
 class Messenger {
+public:
+    // Messenger protocol versions
+    typedef enum {
+      MSG_PROTOCOL_V1,
+      MSG_PROTOCOL_V2
+    } msg_protocol_t;
+
 private:
   list<Dispatcher*> dispatchers;
   list <Dispatcher*> fast_dispatchers;
@@ -47,6 +54,8 @@ private:
                          const entity_name_t &name);
 
 protected:
+  // messenger protocol version
+  msg_protocol_t protocol;
   /// the "name" of the local daemon. eg client.99
   entity_inst_t my_inst;
   int default_send_priority;
@@ -56,6 +65,7 @@ protected:
   int socket_priority;
 
 public:
+
   /**
    * Various Messenger conditional config/type flags to allow
    * different "transport" Messengers to tune themselves
@@ -139,8 +149,10 @@ public:
    * Messenger users should construct full implementations directly,
    * or use the create() function.
    */
-  Messenger(CephContext *cct_, entity_name_t w)
+  Messenger(CephContext *cct_, entity_name_t w,
+            msg_protocol_t protocol=MSG_PROTOCOL_V2)
     : trace_endpoint("0.0.0.0", 0, "Messenger"),
+      protocol(protocol),
       my_inst(),
       default_send_priority(CEPH_MSG_PRIO_DEFAULT), started(false),
       magic(0),
@@ -159,6 +171,7 @@ public:
    * available or specified via the configuration in cct.
    *
    * @param cct context
+   * @param protocol the messenger protocol version
    * @param type name of messenger type
    * @param name entity name to register
    * @param lname logical name of the messenger in this process (e.g., "client")
@@ -167,11 +180,19 @@ public:
    * @param cflags general set of flags to configure transport resources
    */
   static Messenger *create(CephContext *cct,
+                           msg_protocol_t protocol,
                            const string &type,
                            entity_name_t name,
-			   string lname,
+                           string lname,
                            uint64_t nonce,
-			   uint64_t cflags);
+                           uint64_t cflags);
+
+  static Messenger *create(CephContext *cct,
+                           const string &type,
+                           entity_name_t name,
+                           string lname,
+                           uint64_t nonce,
+                           uint64_t cflags);
 
   /**
    * create a new messenger
@@ -184,8 +205,13 @@ public:
    * - use the client entity_type
    *
    * @param cct context
+   * @param protocol the messenger protocol version
    * @param lname logical name of the messenger in this process (e.g., "client")
    */
+  static Messenger *create_client_messenger(CephContext *cct,
+                                            msg_protocol_t protocol,
+                                            string lname);
+
   static Messenger *create_client_messenger(CephContext *cct, string lname);
 
   /**
@@ -228,6 +254,24 @@ public:
    */
   const ZTracer::Endpoint* get_trace_endpoint() const {
     return &trace_endpoint;
+  }
+
+  /**
+   * Checks if this messenger talks protocol V1
+   *
+   * @return true if messenger talks protocol V1, false otherwise
+   */
+  bool is_protocol_v1() {
+    return protocol == MSG_PROTOCOL_V1;
+  }
+
+  /**
+   * Checks if this messenger talks protocol V2
+   *
+   * @return true if messenger talks protocol V2, false otherwise
+   */
+  bool is_protocol_v2() {
+    return protocol == MSG_PROTOCOL_V2;
   }
 
   /**

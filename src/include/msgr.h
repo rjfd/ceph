@@ -28,6 +28,14 @@
 #define CEPH_BANNER "ceph v027"
 
 /*
+ * messenger V2 connection banner prefix.
+ * The full banner string should have the form: "ceph %x %x" the first hex
+ * bytes are the features supported mask and the second hex bytes are the
+ * features requires mask.
+ */
+#define CEPH_BANNER_PREFIX "ceph "
+
+/*
  * Rollover-safe type and comparator for 32-bit sequence numbers.
  * Comparator returns -1, 0, or 1.
  */
