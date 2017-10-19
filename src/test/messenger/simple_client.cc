@@ -162,7 +162,7 @@ int main(int argc, const char **argv)
 	     << " round-trip messages in " << t2-t1 << "s"
 	     << std::endl;
 
-	messenger->shutdown();
+	//messenger->shutdown();
   messenger->wait();
 out:
 	return r;

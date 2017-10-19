@@ -1896,7 +1896,7 @@ void AsyncConnection::process_v2() {
 
       default:
       {
-        if (_process_connection() < 0)
+        if (_process_connection_v2() < 0)
           goto fail;
         break;
       }
@@ -2279,10 +2279,18 @@ ssize_t AsyncConnection::_process_connection_v2() {
       bufferlist bl;
       center->create_file_event(cs.fd(), EVENT_READABLE, read_handler);
 
+      __u32 supported_features = 0;  // Get supported features mask
+      __u32 required_features = 0;  // Get required features mask
+
       size_t banner_len = strlen(CEPH_BANNER_PREFIX) + sizeof(__u32)
                                                      + sizeof(__u32);
       char banner[banner_len];
       memcpy(banner, CEPH_BANNER_PREFIX, strlen(CEPH_BANNER_PREFIX));
+      memcpy(banner+strlen(CEPH_BANNER_PREFIX), (void *)&supported_features,
+             sizeof(__u32));
+      memcpy(banner+strlen(CEPH_BANNER_PREFIX)+sizeof(__u32),
+             (void *)&required_features, sizeof(__u32));
+
 
       bl.append(banner, banner_len);
 
