@@ -28,7 +28,6 @@
 #include "common/ceph_time.h"
 #include "common/perf_counters.h"
 #include "include/buffer.h"
-#include "msg/Connection.h"
 #include "msg/Messenger.h"
 #include "msg/DispatchQueue.h"
 
@@ -47,7 +46,7 @@ static const int ASYNC_IOV_MAX = (IOV_MAX >= 1024 ? IOV_MAX / 4 : IOV_MAX);
  * descriptor broken, AsyncConnection will maintain the message queue and
  * sequence, try to reconnect peer endpoint.
  */
-class AsyncConnection : public Connection {
+class AsyncConnection {
 
   ssize_t read_bulk(char *buf, unsigned len);
   ssize_t do_sendmsg(struct msghdr &msg, unsigned len, bool more);
@@ -60,6 +59,7 @@ class AsyncConnection : public Connection {
   ssize_t _send(Message *m);
   void prepare_send_message(uint64_t features, Message *m, bufferlist &bl);
   ssize_t read_until(unsigned needed, char *p);
+  ssize_t _send_banner();
   ssize_t _process_connection();
   ssize_t _process_connection_v2();
   void _connect();
@@ -186,29 +186,25 @@ class AsyncConnection : public Connection {
 
  public:
   AsyncConnection(CephContext *cct, AsyncMessenger *m, DispatchQueue *q, Worker *w);
-  ~AsyncConnection() override;
+  ~AsyncConnection();
   void maybe_start_delay_thread();
 
   ostream& _conn_prefix(std::ostream *_dout);
 
-  bool is_connected() override {
+  bool is_connected() {
     return can_write.load() == WriteStatus::CANWRITE;
   }
 
   // Only call when AsyncConnection first construct
-  void connect(const entity_addr_t& addr, int type) {
-    set_peer_type(type);
-    set_peer_addr(addr);
-    policy = msgr->get_policy(type);
-    _connect();
-  }
+  void connect(const entity_addr_t& addr, int type);
+    
   // Only call when AsyncConnection first construct
   void accept(ConnectedSocket socket, entity_addr_t &addr);
-  int send_message(Message *m) override;
+  int send_message(Message *m);
 
-  void send_keepalive() override;
-  void mark_down() override;
-  void mark_disposable() override {
+  void send_keepalive();
+  void mark_down();
+  void mark_disposable() {
     std::lock_guard<std::mutex> l(lock);
     policy.lossy = true;
   }
@@ -298,6 +294,8 @@ class AsyncConnection : public Connection {
   int state;
   int state_after_send;
   ConnectedSocket cs;
+  int peer_type;
+  entity_addr_t peer_addr;
   int port;
   Messenger::Policy policy;
 

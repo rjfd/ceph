@@ -33,6 +33,7 @@ class ConnectedSocketImpl {
   virtual void shutdown() = 0;
   virtual void close() = 0;
   virtual int fd() const = 0;
+  virtual entity_addr_t get_source_addr() { return entity_addr_t(); }
 };
 
 class ConnectedSocket;
@@ -124,6 +125,11 @@ class ConnectedSocket {
   /// Get file descriptor
   int fd() const {
     return _csi->fd();
+  }
+
+  /// Returns the local address used in this connection
+  entity_addr_t get_source_addr() {
+    return _csi->get_source_addr();
   }
 
   explicit operator bool() const {

@@ -33,7 +33,7 @@
  * bytes are the features supported mask and the second hex bytes are the
  * features requires mask.
  */
-#define CEPH_BANNER_PREFIX "ceph "
+#define CEPH_BANNER_V2_PREFIX "ceph v2"
 
 /*
  * Rollover-safe type and comparator for 32-bit sequence numbers.

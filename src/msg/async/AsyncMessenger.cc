@@ -20,6 +20,7 @@
 #include <fstream>
 
 #include "AsyncMessenger.h"
+#include "Stream.h"
 
 #include "common/config.h"
 #include "common/Timer.h"
@@ -549,7 +550,10 @@ ConnectionRef AsyncMessenger::get_connection(const entity_inst_t& dest)
     ldout(cct, 10) << __func__ << " " << dest << " new " << conn << dendl;
   }
 
-  return conn;
+  auto stream = new Stream(this->cct, this, conn);
+  stream->set_peer_type(dest.name.type());
+  stream->set_peer_addr(dest.addr);
+  return stream;
 }
 
 ConnectionRef AsyncMessenger::get_loopback_connection()

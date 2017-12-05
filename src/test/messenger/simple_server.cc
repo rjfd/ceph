@@ -44,7 +44,7 @@ int main(int argc, const char **argv)
 
 	using std::endl;
 
-	std::string addr = "localhost";
+	std::string addr = "192.168.1.102";
 	std::string port = "1234";
 	std::string prot = "v1";
 
@@ -54,8 +54,7 @@ int main(int argc, const char **argv)
 	env_to_vec(args);
 
 	auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_ANY,
-			       CODE_ENVIRONMENT_DAEMON,
-			       0);
+												 CODE_ENVIRONMENT_UTILITY, 0);
 
     for (arg_iter = args.begin(); arg_iter != args.end();) {
         if (ceph_argparse_witharg(args, arg_iter, &val, "--addr",

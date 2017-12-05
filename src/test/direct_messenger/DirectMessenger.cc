@@ -112,7 +112,7 @@ static ConnectionRef create_loopback(DirectMessenger *m,
 DirectMessenger::DirectMessenger(CephContext *cct, entity_name_t name,
                                  string mname, uint64_t nonce,
                                  DispatchStrategy *dispatchers)
-  : SimplePolicyMessenger(cct, name, mname, nonce),
+  : SimplePolicyMessenger(cct, name, Messenger::MSG_PROTOCOL_V1, mname, nonce),
     dispatchers(dispatchers),
     loopback_connection(create_loopback(this, name, dispatchers))
 {

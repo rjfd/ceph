@@ -160,6 +160,21 @@ class PosixConnectedSocketImpl final : public ConnectedSocketImpl {
   int fd() const override {
     return _fd;
   }
+
+  entity_addr_t get_source_addr() {
+    entity_addr_t src_addr;
+    sockaddr_in src;
+    socklen_t srclen = sizeof(src);
+    int r = getsockname(_fd, (sockaddr*) &src, &srclen);
+    if (r < 0) {
+      // cannot detect socket's source address
+      return src_addr;
+    }
+
+    src_addr.set_sockaddr((sockaddr *)&src);
+    return src_addr;
+  }
+
   friend class PosixServerSocketImpl;
   friend class PosixNetworkStack;
 };

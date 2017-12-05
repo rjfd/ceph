@@ -1979,9 +1979,7 @@ ssize_t AsyncConnection::_process_connection_v2() {
       center->delete_file_event(cs.fd(), EVENT_WRITABLE);
       ldout(async_msgr->cct, 10) << __func__ << " connect successfully, ready to send banner" << dendl;
 
-      bufferlist bl;
-      bl.append(CEPH_BANNER, strlen(CEPH_BANNER));
-      r = try_send(bl);
+      r = _send_banner();
       if (r == 0) {
         state = STATE_CONNECTING_WAIT_BANNER_AND_IDENTIFY;
         ldout(async_msgr->cct, 10) << __func__ << " connect write banner done: "
@@ -2002,51 +2000,51 @@ ssize_t AsyncConnection::_process_connection_v2() {
     {
       entity_addr_t paddr, peer_addr_for_me;
       bufferlist myaddrbl;
-      unsigned banner_len = strlen(CEPH_BANNER);
-      unsigned need_len = banner_len + sizeof(ceph_entity_addr)*2;
-      r = read_until(need_len, state_buffer);
+      unsigned banner_prefix_len = strlen(CEPH_BANNER_V2_PREFIX);
+      unsigned banner_len = banner_prefix_len + 2 * sizeof(__u32);
+      r = read_until(banner_len, state_buffer);
       if (r < 0) {
-        ldout(async_msgr->cct, 1) << __func__ << " read banner and identify addresses failed" << dendl;
+        ldout(async_msgr->cct, 1) << __func__ << " read banner and identify "
+                                  << "addresses failed" << dendl;
         goto fail;
       } else if (r > 0) {
         break;
       }
 
-      if (memcmp(state_buffer, CEPH_BANNER, banner_len)) {
-        ldout(async_msgr->cct, 0) << __func__ << " connect protocol error (bad banner) on peer "
+      if (memcmp(state_buffer, CEPH_BANNER_V2_PREFIX, banner_prefix_len)) {
+        if (memcmp(state_buffer, CEPH_BANNER, strlen(CEPH_BANNER))) {
+          lderr(async_msgr->cct) << __func__ << " peer " << get_peer_addr()
+                                 << " is using msgr V1 protocol" << dendl;
+          goto fail;
+        }
+        ldout(async_msgr->cct, 0) << __func__ << " connect protocol error "
+                                  << "(bad banner) on peer "
                                   << get_peer_addr() << dendl;
         goto fail;
       }
 
-      bufferlist bl;
-      bl.append(state_buffer+banner_len, sizeof(ceph_entity_addr)*2);
-      bufferlist::iterator p = bl.begin();
-      try {
-        ::decode(paddr, p);
-        ::decode(peer_addr_for_me, p);
-      } catch (const buffer::error& e) {
-        lderr(async_msgr->cct) << __func__ <<  " decode peer addr failed " << dendl;
-        goto fail;
-      }
-      ldout(async_msgr->cct, 20) << __func__ <<  " connect read peer addr "
-                                 << paddr << " on socket " << cs.fd() << dendl;
-      if (memcmp(peer_addr.get_sockaddr(), paddr.get_sockaddr(),
-                 peer_addr.get_sockaddr_len())) {
-        if (paddr.is_blank_ip() && peer_addr.get_port() == paddr.get_port() &&
-            peer_addr.get_nonce() == paddr.get_nonce()) {
-          ldout(async_msgr->cct, 0) << __func__ <<  " connect claims to be " << paddr
-                                    << " not " << peer_addr
-                                    << " - presumably this is the same node!" << dendl;
-        } else {
-          ldout(async_msgr->cct, 10) << __func__ << " connect claims to be "
-                                     << paddr << " not " << peer_addr << dendl;
-          goto fail;
-        }
-      }
+      __u32 peer_supported_features;
+      __u32 peer_required_features;
 
-      ldout(async_msgr->cct, 20) << __func__ << " connect peer addr for me is " << peer_addr_for_me << dendl;
+      memcpy(&peer_supported_features, state_buffer+banner_prefix_len,
+             sizeof(__u32));
+      memcpy(&peer_required_features,
+             state_buffer+banner_prefix_len+sizeof(__u32),
+             sizeof(__u32));
+
+      ldout(async_msgr->cct, 1) << __func__ << " peer " << get_peer_addr()
+                                << " banner supported=" << std::hex
+                                << peer_supported_features << " "
+                                << "required=" << std::hex
+                                << peer_required_features << dendl;
+
+      // TODO: check if peer_required_features matches our supported_features
+
+      entity_addr_t my_addr = cs.get_source_addr();
       lock.unlock();
-      async_msgr->learned_addr(peer_addr_for_me);
+
+      my_addr.set_type(entity_addr_t::TYPE_MSGR2);
+      async_msgr->learned_addr(my_addr);
       if (async_msgr->cct->_conf->ms_inject_internal_delays) {
         if (rand() % async_msgr->cct->_conf->ms_inject_socket_failures == 0) {
           ldout(msgr->cct, 10) << __func__ << " sleep for "
@@ -2064,23 +2062,7 @@ ssize_t AsyncConnection::_process_connection_v2() {
         return 0;
       }
 
-      ::encode(async_msgr->get_myaddr(), myaddrbl, 0); // legacy
-      r = try_send(myaddrbl);
-      if (r == 0) {
-        state = STATE_CONNECTING_SEND_CONNECT_MSG;
-        ldout(async_msgr->cct, 10) << __func__ << " connect sent my addr "
-                                   << async_msgr->get_myaddr() << dendl;
-      } else if (r > 0) {
-        state = STATE_WAIT_SEND;
-        state_after_send = STATE_CONNECTING_SEND_CONNECT_MSG;
-        ldout(async_msgr->cct, 10) << __func__ << " connect send my addr done: "
-                                   << async_msgr->get_myaddr() << dendl;
-      } else {
-        ldout(async_msgr->cct, 2) << __func__ << " connect couldn't write my addr, "
-                                  << cpp_strerror(r) << dendl;
-        goto fail;
-      }
-
+      state = STATE_CONNECTING_SEND_CONNECT_MSG;
       break;
     }
 
@@ -2276,30 +2258,12 @@ ssize_t AsyncConnection::_process_connection_v2() {
 
     case STATE_ACCEPTING:
     {
-      bufferlist bl;
       center->create_file_event(cs.fd(), EVENT_READABLE, read_handler);
 
-      __u32 supported_features = 0;  // Get supported features mask
-      __u32 required_features = 0;  // Get required features mask
+      // We're talking V2 here, set entity_addr_t type to MSGR2
+      socket_addr.set_type(entity_addr_t::TYPE_MSGR2);
 
-      size_t banner_len = strlen(CEPH_BANNER_PREFIX) + sizeof(__u32)
-                                                     + sizeof(__u32);
-      char banner[banner_len];
-      memcpy(banner, CEPH_BANNER_PREFIX, strlen(CEPH_BANNER_PREFIX));
-      memcpy(banner+strlen(CEPH_BANNER_PREFIX), (void *)&supported_features,
-             sizeof(__u32));
-      memcpy(banner+strlen(CEPH_BANNER_PREFIX)+sizeof(__u32),
-             (void *)&required_features, sizeof(__u32));
-
-
-      bl.append(banner, banner_len);
-
-      ::encode(async_msgr->get_myaddr(), bl, 0); // legacy
-      port = async_msgr->get_myaddr().get_port();
-      ::encode(socket_addr, bl, 0); // legacy
-      ldout(async_msgr->cct, 1) << __func__ << " sd=" << cs.fd() << " " << socket_addr << dendl;
-
-      r = try_send(bl);
+      r = _send_banner();
       if (r == 0) {
         state = STATE_ACCEPTING_WAIT_BANNER_ADDR;
         ldout(async_msgr->cct, 10) << __func__ << " write banner and addr done: "
@@ -2317,10 +2281,10 @@ ssize_t AsyncConnection::_process_connection_v2() {
     }
     case STATE_ACCEPTING_WAIT_BANNER_ADDR:
     {
-      bufferlist addr_bl;
-      entity_addr_t peer_addr;
+      unsigned banner_prefix_len = strlen(CEPH_BANNER_V2_PREFIX);
+      unsigned banner_len = banner_prefix_len + 2 * sizeof(__u32);
 
-      r = read_until(strlen(CEPH_BANNER) + sizeof(ceph_entity_addr), state_buffer);
+      r = read_until(banner_len, state_buffer);
       if (r < 0) {
         ldout(async_msgr->cct, 1) << __func__ << " read peer banner and addr failed" << dendl;
         goto fail;
@@ -2328,31 +2292,42 @@ ssize_t AsyncConnection::_process_connection_v2() {
         break;
       }
 
-      if (memcmp(state_buffer, CEPH_BANNER, strlen(CEPH_BANNER))) {
+      if (memcmp(state_buffer, CEPH_BANNER_V2_PREFIX, banner_prefix_len)) {
+        if (memcmp(state_buffer, CEPH_BANNER, strlen(CEPH_BANNER))) {
+          lderr(async_msgr->cct) << __func__ << " peer " << get_peer_addr()
+                                 << " is using msgr V1 protocol" << dendl;
+          goto fail;
+        }
         ldout(async_msgr->cct, 1) << __func__ << " accept peer sent bad banner '" << state_buffer
                                   << "' (should be '" << CEPH_BANNER << "')" << dendl;
         goto fail;
       }
 
-      addr_bl.append(state_buffer+strlen(CEPH_BANNER), sizeof(ceph_entity_addr));
-      try {
-        bufferlist::iterator ti = addr_bl.begin();
-        ::decode(peer_addr, ti);
-      } catch (const buffer::error& e) {
-        lderr(async_msgr->cct) << __func__ <<  " decode peer_addr failed " << dendl;
-        goto fail;
-      }
+      __u32 peer_supported_features;
+      __u32 peer_required_features;
 
-      ldout(async_msgr->cct, 10) << __func__ << " accept peer addr is " << peer_addr << dendl;
-      if (peer_addr.is_blank_ip()) {
-        // peer apparently doesn't know what ip they have; figure it out for them.
-        int port = peer_addr.get_port();
-        peer_addr.u = socket_addr.u;
-        peer_addr.set_port(port);
-        ldout(async_msgr->cct, 0) << __func__ << " accept peer addr is really " << peer_addr
-                                  << " (socket is " << socket_addr << ")" << dendl;
-      }
+      memcpy(&peer_supported_features, state_buffer+banner_prefix_len,
+             sizeof(__u32));
+      memcpy(&peer_required_features,
+             state_buffer+banner_prefix_len+sizeof(__u32),
+             sizeof(__u32));
+
+      ldout(async_msgr->cct, 1) << __func__ << " peer " << get_peer_addr()
+                                << " banner supported=" << std::hex
+                                << peer_supported_features << " "
+                                << "required=" << std::hex
+                                << peer_required_features << dendl;
+
+      // TODO: check if peer_required_features matches our supported_features
+
+
+      int port = peer_addr.get_port();
+      peer_addr.set_type(entity_addr_t::TYPE_MSGR2);
+      peer_addr.u = socket_addr.u;
+      peer_addr.set_port(port);
       set_peer_addr(peer_addr);  // so that connection_state gets set up
+      ldout(async_msgr->cct, 10) << __func__ << " accept peer addr is " << peer_addr << dendl;
+
       state = STATE_ACCEPTING_WAIT_CONNECT_MSG;
       break;
     }
@@ -2463,6 +2438,25 @@ ssize_t AsyncConnection::_process_connection_v2() {
 
   fail:
   return -1;
+}
+
+ssize_t AsyncConnection::_send_banner() {
+  __u32 supported_features = 20;  // Get supported features mask
+  __u32 required_features = 30;  // Get required features mask
+
+  size_t banner_prefix_len = strlen(CEPH_BANNER_V2_PREFIX);
+  size_t banner_len = banner_prefix_len + 2 * sizeof(__u32);
+  char banner[banner_len];
+  memcpy(banner, CEPH_BANNER_V2_PREFIX, banner_prefix_len);
+  memcpy(banner+banner_prefix_len, (void *)&supported_features,
+         sizeof(__u32));
+  memcpy(banner+banner_prefix_len+sizeof(__u32),
+         (void *)&required_features, sizeof(__u32));
+
+  bufferlist bl;
+  bl.append(banner, banner_len);
+
+  return try_send(bl);
 }
 
 int AsyncConnection::handle_connect_reply(ceph_msg_connect &connect, ceph_msg_connect_reply &reply)
@@ -2954,6 +2948,13 @@ void AsyncConnection::_connect()
   // rescheduler connection in order to avoid lock dep
   // may called by external thread(send_message)
   center->dispatch_event_external(read_handler);
+}
+
+void AsyncConnection::connect(const entity_addr_t& addr, int type) {
+  peer_addr = addr;
+  peer_type = type;
+  policy = async_msgr->get_policy(type);
+  _connect();
 }
 
 void AsyncConnection::accept(ConnectedSocket socket, entity_addr_t &addr)

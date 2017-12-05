@@ -56,11 +56,11 @@ int main(int argc, const char **argv)
 	ConnectionRef conn;
 	int r = 0;
 
-	std::string addr = "localhost";
+	std::string addr = "192.168.1.102";
 	std::string port = "1234";
     std::string prot = "v1";
 
-	int n_msgs = 50;
+	int n_msgs = 1;
 	int n_dsize = 0;
 
 	struct timespec ts;
