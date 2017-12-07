@@ -1122,7 +1122,7 @@ void OSDMap::set_max_osd(int m)
   osd_xinfo.resize(m);
   osd_addrs->client_addr.resize(m);
   osd_addrs->cluster_addr.resize(m);
-  if (require_osd_release >= CEPH_RELEASE_MIMIC) {
+  if (require_osd_release < CEPH_RELEASE_MIMIC) {
     osd_addrs->hb_back_addr.resize(m);
     osd_addrs->hb_front_addr.resize(m);
   } else {
