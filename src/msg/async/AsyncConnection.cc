@@ -123,13 +123,13 @@ static void alloc_aligned_buffer(bufferlist& data, unsigned len, unsigned off)
 
 AsyncConnection::AsyncConnection(CephContext *cct, AsyncMessenger *m, DispatchQueue *q,
                                  Worker *w)
-  : Connection(cct, m), delay_state(NULL), async_msgr(m), conn_id(q->get_id()),
+  : delay_state(NULL), cct(cct), async_msgr(m), stream_counter(0), conn_id(q->get_id()),
     logger(w->get_perf_counter()), global_seq(0), connect_seq(0), peer_global_seq(0),
     state(STATE_NONE), state_after_send(STATE_NONE), port(-1),
     dispatch_queue(q),
     can_write(WriteStatus::NOWRITE),
     keepalive(false), recv_buf(NULL),
-    recv_max_prefetch(MAX(msgr->cct->_conf->ms_tcp_prefetch_max_size, TCP_PREFETCH_MIN_SIZE)),
+    recv_max_prefetch(MAX(async_msgr->cct->_conf->ms_tcp_prefetch_max_size, TCP_PREFETCH_MIN_SIZE)),
     recv_start(0), recv_end(0),
     last_active(ceph::coarse_mono_clock::now()),
     inactive_timeout_us(cct->_conf->ms_tcp_read_timeout*1000*1000),
@@ -145,6 +145,8 @@ AsyncConnection::AsyncConnection(CephContext *cct, AsyncMessenger *m, DispatchQu
   recv_buf = new char[2*recv_max_prefetch];
   state_buffer = new char[4096];
   logger->inc(l_msgr_created_connections);
+
+  pending_streams[stream_counter++] = new Stream(cct, m);
 }
 
 AsyncConnection::~AsyncConnection()
@@ -166,8 +168,8 @@ void AsyncConnection::maybe_start_delay_thread()
       "ms_inject_delay_type",
       [this](const string& s) {
 	if (s.find(ceph_entity_type_name(peer_type)) != string::npos) {
-	  ldout(msgr->cct, 1) << __func__ << " setting up a delay queue"
-			      << dendl;
+	  ldout(async_msgr->cct, 1) << __func__ << " setting up a delay queue"
+			            << dendl;
 	  delay_state = new DelayedDelivery(async_msgr, center, dispatch_queue,
 					    conn_id);
 	}
@@ -462,7 +464,7 @@ void AsyncConnection::process()
                               << " data=" << header.data_len
                               << " off " << header.data_off << dendl;
 
-	  if (msgr->crcflags & MSG_CRC_HEADER) {
+	  if (async_msgr->crcflags & MSG_CRC_HEADER) {
 	    header_crc = ceph_crc32c(0, (unsigned char *)&header,
 		sizeof(header) - sizeof(header.crc));
 	    // verify header crc
@@ -683,12 +685,15 @@ void AsyncConnection::process()
 
           ldout(async_msgr->cct, 20) << __func__ << " got " << front.length() << " + " << middle.length()
                               << " + " << data.length() << " byte message" << dendl;
+        /* TODO: this code should be done in the context of a stream
           Message *message = decode_message(async_msgr->cct, async_msgr->crcflags, current_header, footer,
                                             front, middle, data, this);
           if (!message) {
             ldout(async_msgr->cct, 1) << __func__ << " decode message failed " << dendl;
             goto fail;
           }
+          */
+          Message *message = nullptr;
 
           //
           //  Check the signature if one should be present.  A zero return indicates success. PLR
@@ -736,7 +741,8 @@ void AsyncConnection::process()
               assert(0 == "skipped incoming seq");
           }
 
-          message->set_connection(this);
+          // TODO: set stream
+          //message->set_connection(this);
 
 #if defined(WITH_LTTNG) && defined(WITH_EVENTTRACE)
           if (message->get_type() == CEPH_MSG_OSD_OP || message->get_type() == CEPH_MSG_OSD_OPREPLY) {
@@ -878,7 +884,7 @@ ssize_t AsyncConnection::_process_connection()
 
         SocketOptions opts;
         opts.priority = async_msgr->get_socket_priority();
-        opts.connect_bind_addr = msgr->get_myaddr();
+        opts.connect_bind_addr = async_msgr->get_myaddr();
         r = worker->connect(get_peer_addr(), opts, &cs);
         if (r < 0)
           goto fail;
@@ -895,7 +901,8 @@ ssize_t AsyncConnection::_process_connection()
           ldout(async_msgr->cct, 1) << __func__ << " reconnect failed " << dendl;
           if (r == -ECONNREFUSED) {
             ldout(async_msgr->cct, 2) << __func__ << " connection refused!" << dendl;
-            dispatch_queue->queue_refused(this);
+            // TODO: call queue_refused in all streams
+            //dispatch_queue->queue_refused(this);
           }
           goto fail;
         } else if (r == 0) {
@@ -978,7 +985,7 @@ ssize_t AsyncConnection::_process_connection()
         async_msgr->learned_addr(peer_addr_for_me);
         if (async_msgr->cct->_conf->ms_inject_internal_delays) {
           if (rand() % async_msgr->cct->_conf->ms_inject_socket_failures == 0) {
-            ldout(msgr->cct, 10) << __func__ << " sleep for "
+            ldout(async_msgr->cct, 10) << __func__ << " sleep for "
                                  << async_msgr->cct->_conf->ms_inject_internal_delays << dendl;
             utime_t t;
             t.set_from_double(async_msgr->cct->_conf->ms_inject_internal_delays);
@@ -1184,8 +1191,9 @@ ssize_t AsyncConnection::_process_connection()
 
         if (delay_state)
           assert(delay_state->ready());
-        dispatch_queue->queue_connect(this);
-        async_msgr->ms_deliver_handle_fast_connect(this);
+        // TODO: call queue_connect in for the stream
+        //dispatch_queue->queue_connect(this);
+        //async_msgr->ms_deliver_handle_fast_connect(this);
 
         // make sure no pending tick timer
         if (last_tick_id)
@@ -1515,7 +1523,7 @@ void AsyncConnection::process_v2() {
 
         if (has_feature(CEPH_FEATURE_NOSRCADDR)) {
           header = *((ceph_msg_header*)state_buffer);
-          if (msgr->crcflags & MSG_CRC_HEADER)
+          if (async_msgr->crcflags & MSG_CRC_HEADER)
             header_crc = ceph_crc32c(0, (unsigned char *)&header,
                                      sizeof(header) - sizeof(header.crc));
         } else {
@@ -1524,7 +1532,7 @@ void AsyncConnection::process_v2() {
           memcpy(&header, &oldheader, sizeof(header));
           header.src = oldheader.src.name;
           header.reserved = oldheader.reserved;
-          if (msgr->crcflags & MSG_CRC_HEADER) {
+          if (async_msgr->crcflags & MSG_CRC_HEADER) {
             header.crc = oldheader.crc;
             header_crc = ceph_crc32c(0, (unsigned char *)&oldheader, sizeof(oldheader) - sizeof(oldheader.crc));
           }
@@ -1537,7 +1545,7 @@ void AsyncConnection::process_v2() {
                                    << " off " << header.data_off << dendl;
 
         // verify header crc
-        if (msgr->crcflags & MSG_CRC_HEADER && header_crc != header.crc) {
+        if (async_msgr->crcflags & MSG_CRC_HEADER && header_crc != header.crc) {
           ldout(async_msgr->cct,0) << __func__ << " got bad header crc "
                                    << header_crc << " != " << header.crc << dendl;
           goto fail;
@@ -1753,12 +1761,14 @@ void AsyncConnection::process_v2() {
 
         ldout(async_msgr->cct, 20) << __func__ << " got " << front.length() << " + " << middle.length()
                                    << " + " << data.length() << " byte message" << dendl;
+        /* TODO: this code should be done in the context of a stream
         Message *message = decode_message(async_msgr->cct, async_msgr->crcflags, current_header, footer,
                                           front, middle, data, this);
         if (!message) {
           ldout(async_msgr->cct, 1) << __func__ << " decode message failed " << dendl;
           goto fail;
-        }
+        }*/
+          Message *message = nullptr;
 
         //
         //  Check the signature if one should be present.  A zero return indicates success. PLR
@@ -1806,7 +1816,8 @@ void AsyncConnection::process_v2() {
             assert(0 == "skipped incoming seq");
         }
 
-        message->set_connection(this);
+          // TODO: set stream
+        //message->set_connection(this);
 
 #if defined(WITH_LTTNG) && defined(WITH_EVENTTRACE)
         if (message->get_type() == CEPH_MSG_OSD_OP || message->get_type() == CEPH_MSG_OSD_OPREPLY) {
@@ -1847,7 +1858,7 @@ void AsyncConnection::process_v2() {
             ldout(async_msgr->cct, 1) << "queue_received will delay until " << release << " on "
                                       << message << " " << *message << dendl;
           }
-          delay_state->queue(delay_period, release, message);
+          delay_state->queue(delay_period, message);
         } else if (async_msgr->ms_can_fast_dispatch(message)) {
           lock.unlock();
           dispatch_queue->fast_dispatch(message);
@@ -1949,7 +1960,7 @@ ssize_t AsyncConnection::_process_connection_v2() {
 
       SocketOptions opts;
       opts.priority = async_msgr->get_socket_priority();
-      opts.connect_bind_addr = msgr->get_myaddr();
+      opts.connect_bind_addr = async_msgr->get_myaddr();
       r = worker->connect(get_peer_addr(), opts, &cs);
       if (r < 0)
         goto fail;
@@ -1966,7 +1977,9 @@ ssize_t AsyncConnection::_process_connection_v2() {
         ldout(async_msgr->cct, 1) << __func__ << " reconnect failed " << dendl;
         if (r == -ECONNREFUSED) {
           ldout(async_msgr->cct, 2) << __func__ << " connection refused!" << dendl;
-          dispatch_queue->queue_refused(this);
+          for (const auto& stream: streams) {
+            dispatch_queue->queue_refused(stream.second.get());
+          }
         }
         goto fail;
       } else if (r == 0) {
@@ -2047,7 +2060,7 @@ ssize_t AsyncConnection::_process_connection_v2() {
       async_msgr->learned_addr(my_addr);
       if (async_msgr->cct->_conf->ms_inject_internal_delays) {
         if (rand() % async_msgr->cct->_conf->ms_inject_socket_failures == 0) {
-          ldout(msgr->cct, 10) << __func__ << " sleep for "
+          ldout(async_msgr->cct, 10) << __func__ << " sleep for "
                                << async_msgr->cct->_conf->ms_inject_internal_delays << dendl;
           utime_t t;
           t.set_from_double(async_msgr->cct->_conf->ms_inject_internal_delays);
@@ -2062,10 +2075,106 @@ ssize_t AsyncConnection::_process_connection_v2() {
         return 0;
       }
 
+      assert(pending_streams.size() > 0);
       state = STATE_CONNECTING_SEND_CONNECT_MSG;
       break;
     }
 
+    case STATE_ACCEPTING:
+    {
+      center->create_file_event(cs.fd(), EVENT_READABLE, read_handler);
+
+      // We're talking V2 here, set entity_addr_t type to MSGR2
+      socket_addr.set_type(entity_addr_t::TYPE_MSGR2);
+
+      r = _send_banner();
+      if (r == 0) {
+        state = STATE_ACCEPTING_WAIT_BANNER_ADDR;
+        ldout(async_msgr->cct, 10) << __func__ << " write banner and addr done: "
+                                   << get_peer_addr() << dendl;
+      } else if (r > 0) {
+        state = STATE_WAIT_SEND;
+        state_after_send = STATE_ACCEPTING_WAIT_BANNER_ADDR;
+        ldout(async_msgr->cct, 10) << __func__ << " wait for write banner and addr: "
+                                   << get_peer_addr() << dendl;
+      } else {
+        goto fail;
+      }
+
+      break;
+    }
+    case STATE_ACCEPTING_WAIT_BANNER_ADDR:
+    {
+      unsigned banner_prefix_len = strlen(CEPH_BANNER_V2_PREFIX);
+      unsigned banner_len = banner_prefix_len + 2 * sizeof(__u32);
+
+      r = read_until(banner_len, state_buffer);
+      if (r < 0) {
+        ldout(async_msgr->cct, 1) << __func__ << " read peer banner and addr failed" << dendl;
+        goto fail;
+      } else if (r > 0) {
+        break;
+      }
+
+      if (memcmp(state_buffer, CEPH_BANNER_V2_PREFIX, banner_prefix_len)) {
+        if (memcmp(state_buffer, CEPH_BANNER, strlen(CEPH_BANNER))) {
+          lderr(async_msgr->cct) << __func__ << " peer " << get_peer_addr()
+                                 << " is using msgr V1 protocol" << dendl;
+          goto fail;
+        }
+        ldout(async_msgr->cct, 1) << __func__ << " accept peer sent bad banner '" << state_buffer
+                                  << "' (should be '" << CEPH_BANNER << "')" << dendl;
+        goto fail;
+      }
+
+      __u32 peer_supported_features;
+      __u32 peer_required_features;
+
+      memcpy(&peer_supported_features, state_buffer+banner_prefix_len,
+             sizeof(__u32));
+      memcpy(&peer_required_features,
+             state_buffer+banner_prefix_len+sizeof(__u32),
+             sizeof(__u32));
+
+      ldout(async_msgr->cct, 1) << __func__ << " peer " << get_peer_addr()
+                                << " banner supported=" << std::hex
+                                << peer_supported_features << " "
+                                << "required=" << std::hex
+                                << peer_required_features << dendl;
+
+      // TODO: check if peer_required_features matches our supported_features
+
+
+      int port = peer_addr.get_port();
+      peer_addr.set_type(entity_addr_t::TYPE_MSGR2);
+      peer_addr.u = socket_addr.u;
+      peer_addr.set_port(port);
+      set_peer_addr(peer_addr);  // so that connection_state gets set up
+      ldout(async_msgr->cct, 10) << __func__ << " accept peer addr is " << peer_addr << dendl;
+
+      pending_streams[stream_counter++] = new Stream(cct, async_msgr);
+      state = STATE_ACCEPTING_WAIT_CONNECT_MSG;
+      break;
+    }
+
+    default:
+    {
+      if (_process_stream_v2() < 0)
+        goto fail;
+      break;
+    }
+  }
+
+  return 0;
+
+  fail:
+  return -1;
+}
+
+ssize_t AsyncConnection::_process_stream_v2() {
+  ssize_t r = 0;
+
+  switch(state) {
     case STATE_CONNECTING_SEND_CONNECT_MSG:
     {
       if (!got_bad_auth) {
@@ -2237,8 +2346,9 @@ ssize_t AsyncConnection::_process_connection_v2() {
 
       if (delay_state)
         assert(delay_state->ready());
-      dispatch_queue->queue_connect(this);
-      async_msgr->ms_deliver_handle_fast_connect(this);
+      // TODO: call this on stream
+      //dispatch_queue->queue_connect(this);
+      //async_msgr->ms_deliver_handle_fast_connect(this);
 
       // make sure no pending tick timer
       if (last_tick_id)
@@ -2253,82 +2363,6 @@ ssize_t AsyncConnection::_process_connection_v2() {
         center->dispatch_event_external(write_handler);
       write_lock.unlock();
       maybe_start_delay_thread();
-      break;
-    }
-
-    case STATE_ACCEPTING:
-    {
-      center->create_file_event(cs.fd(), EVENT_READABLE, read_handler);
-
-      // We're talking V2 here, set entity_addr_t type to MSGR2
-      socket_addr.set_type(entity_addr_t::TYPE_MSGR2);
-
-      r = _send_banner();
-      if (r == 0) {
-        state = STATE_ACCEPTING_WAIT_BANNER_ADDR;
-        ldout(async_msgr->cct, 10) << __func__ << " write banner and addr done: "
-                                   << get_peer_addr() << dendl;
-      } else if (r > 0) {
-        state = STATE_WAIT_SEND;
-        state_after_send = STATE_ACCEPTING_WAIT_BANNER_ADDR;
-        ldout(async_msgr->cct, 10) << __func__ << " wait for write banner and addr: "
-                                   << get_peer_addr() << dendl;
-      } else {
-        goto fail;
-      }
-
-      break;
-    }
-    case STATE_ACCEPTING_WAIT_BANNER_ADDR:
-    {
-      unsigned banner_prefix_len = strlen(CEPH_BANNER_V2_PREFIX);
-      unsigned banner_len = banner_prefix_len + 2 * sizeof(__u32);
-
-      r = read_until(banner_len, state_buffer);
-      if (r < 0) {
-        ldout(async_msgr->cct, 1) << __func__ << " read peer banner and addr failed" << dendl;
-        goto fail;
-      } else if (r > 0) {
-        break;
-      }
-
-      if (memcmp(state_buffer, CEPH_BANNER_V2_PREFIX, banner_prefix_len)) {
-        if (memcmp(state_buffer, CEPH_BANNER, strlen(CEPH_BANNER))) {
-          lderr(async_msgr->cct) << __func__ << " peer " << get_peer_addr()
-                                 << " is using msgr V1 protocol" << dendl;
-          goto fail;
-        }
-        ldout(async_msgr->cct, 1) << __func__ << " accept peer sent bad banner '" << state_buffer
-                                  << "' (should be '" << CEPH_BANNER << "')" << dendl;
-        goto fail;
-      }
-
-      __u32 peer_supported_features;
-      __u32 peer_required_features;
-
-      memcpy(&peer_supported_features, state_buffer+banner_prefix_len,
-             sizeof(__u32));
-      memcpy(&peer_required_features,
-             state_buffer+banner_prefix_len+sizeof(__u32),
-             sizeof(__u32));
-
-      ldout(async_msgr->cct, 1) << __func__ << " peer " << get_peer_addr()
-                                << " banner supported=" << std::hex
-                                << peer_supported_features << " "
-                                << "required=" << std::hex
-                                << peer_required_features << dendl;
-
-      // TODO: check if peer_required_features matches our supported_features
-
-
-      int port = peer_addr.get_port();
-      peer_addr.set_type(entity_addr_t::TYPE_MSGR2);
-      peer_addr.u = socket_addr.u;
-      peer_addr.set_port(port);
-      set_peer_addr(peer_addr);  // so that connection_state gets set up
-      ldout(async_msgr->cct, 10) << __func__ << " accept peer addr is " << peer_addr << dendl;
-
-      state = STATE_ACCEPTING_WAIT_CONNECT_MSG;
       break;
     }
 
@@ -2429,7 +2463,6 @@ ssize_t AsyncConnection::_process_connection_v2() {
       ceph_abort();
     }
   }
-
   return 0;
 
   fail_registered:
@@ -2579,13 +2612,14 @@ ssize_t AsyncConnection::handle_connect_msg(ceph_msg_connect &connect, bufferlis
   lock.unlock();
 
   bool authorizer_valid;
+  /* TODO: Stream specific code
   if (!async_msgr->verify_authorizer(this, peer_type, connect.authorizer_protocol, authorizer_bl,
                                authorizer_reply, authorizer_valid, session_key) || !authorizer_valid) {
     lock.lock();
     ldout(async_msgr->cct,0) << __func__ << ": got bad authorizer" << dendl;
     session_security.reset();
     return _reply_accept(CEPH_MSGR_TAG_BADAUTHORIZER, connect, reply, authorizer_reply);
-  }
+  }*/
 
   // We've verified the authorizer for this AsyncConnection, so set up the session security structure.  PLR
   ldout(async_msgr->cct, 10) << __func__ << " accept setting up session_security." << dendl;
@@ -2745,7 +2779,8 @@ ssize_t AsyncConnection::handle_connect_msg(ceph_msg_connect &connect, bufferlis
     // disconnect from the Connection
     ldout(async_msgr->cct, 1) << __func__ << " replacing on lossy channel, failing existing" << dendl;
     existing->_stop();
-    existing->dispatch_queue->queue_reset(existing.get());
+    // TODO: call queue_reset in all streams
+    //existing->dispatch_queue->queue_reset(existing.get());
   } else {
     assert(can_write == WriteStatus::NOWRITE);
     existing->write_lock.lock();
@@ -2771,7 +2806,8 @@ ssize_t AsyncConnection::handle_connect_msg(ceph_msg_connect &connect, bufferlis
     // queue a reset on the new connection, which we're dumping for the old
     _stop();
 
-    dispatch_queue->queue_reset(this);
+    // TODO: call queue_reset on all streams
+    //dispatch_queue->queue_reset(this);
     ldout(async_msgr->cct, 1) << __func__ << " stop myself to swap existing" << dendl;
     existing->can_write = WriteStatus::REPLACING;
     existing->replacing = true;
@@ -2917,8 +2953,9 @@ ssize_t AsyncConnection::handle_connect_msg(ceph_msg_connect &connect, bufferlis
     goto fail_registered;
 
   // notify
-  dispatch_queue->queue_accept(this);
-  async_msgr->ms_deliver_handle_fast_accept(this);
+  // TODO: call this on a specific stream
+  //dispatch_queue->queue_accept(this);
+  //async_msgr->ms_deliver_handle_fast_accept(this);
   once_ready = true;
 
   if (r == 0) {
@@ -2938,6 +2975,10 @@ ssize_t AsyncConnection::handle_connect_msg(ceph_msg_connect &connect, bufferlis
  fail:
   ldout(async_msgr->cct, 10) << __func__ << " failed to accept." << dendl;
   return -1;
+}
+
+Messenger *AsyncConnection::get_messenger() {
+  return async_msgr;
 }
 
 void AsyncConnection::_connect()
@@ -2985,7 +3026,8 @@ int AsyncConnection::send_message(Message *m)
     m->set_priority(async_msgr->get_default_send_priority());
 
   m->get_header().src = async_msgr->get_myname();
-  m->set_connection(this);
+  // TODO: set stream
+  //m->set_connection(this);
 
   if (m->get_type() == CEPH_MSG_OSD_OP)
     OID_EVENT_TRACE_WITH_MSG(m, "SEND_MSG_OSD_OP_BEGIN", true);
@@ -3123,7 +3165,8 @@ void AsyncConnection::fault()
   if (policy.lossy && !(state >= STATE_CONNECTING && state < STATE_CONNECTING_READY)) {
     ldout(async_msgr->cct, 1) << __func__ << " on lossy channel, failing" << dendl;
     _stop();
-    dispatch_queue->queue_reset(this);
+    // TODO: call queue_reset in all streams
+    //dispatch_queue->queue_reset(this);
     return ;
   }
 
@@ -3148,7 +3191,8 @@ void AsyncConnection::fault()
                               << " accept state just closed" << dendl;
     write_lock.unlock();
     _stop();
-    dispatch_queue->queue_reset(this);
+    // TODO: call queue_reset in all streams
+    //dispatch_queue->queue_reset(this);
     return ;
   }
   replacing = false;
@@ -3205,7 +3249,8 @@ void AsyncConnection::was_session_reset()
   // called by other thread, so let caller clear this itself!
   // outcoming_bl.clear();
 
-  dispatch_queue->queue_remote_reset(this);
+  // TODO: call this on all streams
+  //dispatch_queue->queue_remote_reset(this);
 
   randomize_out_seq();
 
@@ -3255,7 +3300,7 @@ void AsyncConnection::prepare_send_message(uint64_t features, Message *m, buffer
                                << features << " " << m << " " << *m << dendl;
 
   // encode and copy out of *m
-  m->encode(features, msgr->crcflags);
+  m->encode(features, async_msgr->crcflags);
 
   bl.append(m->get_payload());
   bl.append(m->get_middle());
@@ -3268,7 +3313,7 @@ ssize_t AsyncConnection::write_message(Message *m, bufferlist& bl, bool more)
   assert(center->in_thread());
   m->set_seq(++out_seq);
 
-  if (msgr->crcflags & MSG_CRC_HEADER)
+  if (async_msgr->crcflags & MSG_CRC_HEADER)
     m->calc_header_crc();
 
   ceph_msg_header& header = m->get_header();
@@ -3314,14 +3359,14 @@ ssize_t AsyncConnection::write_message(Message *m, bufferlist& bl, bool more)
   if (has_feature(CEPH_FEATURE_MSG_AUTH)) {
     outcoming_bl.append((char*)&footer, sizeof(footer));
   } else {
-    if (msgr->crcflags & MSG_CRC_HEADER) {
+    if (async_msgr->crcflags & MSG_CRC_HEADER) {
       old_footer.front_crc = footer.front_crc;
       old_footer.middle_crc = footer.middle_crc;
       old_footer.data_crc = footer.data_crc;
     } else {
        old_footer.front_crc = old_footer.middle_crc = 0;
     }
-    old_footer.data_crc = msgr->crcflags & MSG_CRC_DATA ? footer.data_crc : 0;
+    old_footer.data_crc = async_msgr->crcflags & MSG_CRC_DATA ? footer.data_crc : 0;
     old_footer.flags = footer.flags;
     outcoming_bl.append((char*)&old_footer, sizeof(old_footer));
   }
@@ -3600,3 +3645,21 @@ void AsyncConnection::tick(uint64_t id)
     last_tick_id = center->create_time_event(inactive_timeout_us, tick_handler);
   }
 }
+
+StreamRef AsyncConnection::create_stream(uint64_t features) {
+  return boost::intrusive_ptr<Stream>(new Stream(cct, async_msgr));
+}
+
+StreamRef AsyncConnection::get_default_stream() {
+  std::lock_guard<std::mutex> l(lock);
+  if (pending_streams.find(0) != pending_streams.end()) {
+    return pending_streams[0];
+  } else {
+    if (streams.find(0) != streams.end()) {
+      return streams[0];
+    }
+  }
+  // stream 0 must always exist
+  assert(false);
+}
+

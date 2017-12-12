@@ -271,7 +271,7 @@ AsyncMessenger::AsyncMessenger(CephContext *cct, entity_name_t name,
   stack = single->stack.get();
   stack->start();
   local_worker = stack->get_worker();
-  local_connection = new AsyncConnection(cct, this, &dispatch_queue, local_worker);
+  local_connection = new Stream(this->cct, this);
   init_local_connection();
   reap_handler = new C_handle_reap(this);
   unsigned processor_num = 1;
@@ -543,16 +543,16 @@ ConnectionRef AsyncMessenger::get_connection(const entity_inst_t& dest)
   }
 
   AsyncConnectionRef conn = _lookup_conn(dest.addr);
+  StreamRef stream;
   if (conn) {
+    stream = conn->create_stream(0);
     ldout(cct, 10) << __func__ << " " << dest << " existing " << conn << dendl;
   } else {
     conn = create_connect(dest.addr, dest.name.type());
+    stream = conn->get_default_stream();
     ldout(cct, 10) << __func__ << " " << dest << " new " << conn << dendl;
   }
 
-  auto stream = new Stream(this->cct, this, conn);
-  stream->set_peer_type(dest.name.type());
-  stream->set_peer_addr(dest.addr);
   return stream;
 }
 

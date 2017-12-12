@@ -2,7 +2,8 @@
 #define CEPH_MSG_STREAM_H
 
 #include "msg/Connection.h"
-#include "AsyncConnection.h"
+
+class AsyncConnection;
 
 /**
  * A Stream is a logical connection between two endpoints.
@@ -12,32 +13,27 @@
  */
 class Stream : public Connection {
   private:
-    AsyncConnectionRef conn;
+    uint32_t stream_id;
+    uint64_t features;
+    AsyncConnection *conn;
+
   public:
-    Stream(CephContext *cct, Messenger *m, AsyncConnectionRef conn) :
-      Connection(cct, m),
-      conn(conn) {
-    }
+    Stream(CephContext *cct, Messenger *m);
 
-    virtual ~Stream() override {
-      Connection::~Connection();
-    }
+    virtual ~Stream();
 
-    virtual int send_message(Message *m) {
-      return conn->send_message(m);
-    }
+    virtual int send_message(Message *m);
 
-    virtual void send_keepalive() {
-      conn->send_keepalive();
-    }
+    virtual void send_keepalive();
 
-    virtual void mark_down() {
-      conn->mark_down();
-    }
+    virtual void mark_down();
 
-    virtual void mark_disposable() {
-      conn->mark_disposable();
-    }
-};
+    virtual void mark_disposable();
+
+    virtual bool is_connected();
+
+}; /* Stream */
+
+typedef boost::intrusive_ptr<Stream> StreamRef;
 
 #endif /* CEPH_MSG_STREAM_H */

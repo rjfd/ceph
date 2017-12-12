@@ -33,6 +33,7 @@
 
 #include "Event.h"
 #include "Stack.h"
+#include "Stream.h"
 
 class AsyncMessenger;
 class Worker;
@@ -46,7 +47,7 @@ static const int ASYNC_IOV_MAX = (IOV_MAX >= 1024 ? IOV_MAX / 4 : IOV_MAX);
  * descriptor broken, AsyncConnection will maintain the message queue and
  * sequence, try to reconnect peer endpoint.
  */
-class AsyncConnection {
+class AsyncConnection : public RefCountedObject {
 
   ssize_t read_bulk(char *buf, unsigned len);
   ssize_t do_sendmsg(struct msghdr &msg, unsigned len, bool more);
@@ -62,6 +63,7 @@ class AsyncConnection {
   ssize_t _send_banner();
   ssize_t _process_connection();
   ssize_t _process_connection_v2();
+  ssize_t _process_stream_v2();
   void _connect();
   void _stop();
   int handle_connect_reply(ceph_msg_connect &connect, ceph_msg_connect_reply &r);
@@ -185,6 +187,9 @@ class AsyncConnection {
   } *delay_state;
 
  public:
+  int peer_type;
+  entity_addr_t peer_addr;
+
   AsyncConnection(CephContext *cct, AsyncMessenger *m, DispatchQueue *q, Worker *w);
   ~AsyncConnection();
   void maybe_start_delay_thread();
@@ -194,6 +199,8 @@ class AsyncConnection {
   bool is_connected() {
     return can_write.load() == WriteStatus::CANWRITE;
   }
+
+  Messenger *get_messenger();
 
   // Only call when AsyncConnection first construct
   void connect(const entity_addr_t& addr, int type);
@@ -284,7 +291,11 @@ class AsyncConnection {
       return statenames[state];
   }
 
+  CephContext *cct;
   AsyncMessenger *async_msgr;
+  uint32_t stream_counter;
+  map<uint32_t, StreamRef> pending_streams;
+  map<uint32_t, StreamRef> streams;
   uint64_t conn_id;
   PerfCounters *logger;
   int global_seq;
@@ -294,10 +305,12 @@ class AsyncConnection {
   int state;
   int state_after_send;
   ConnectedSocket cs;
-  int peer_type;
-  entity_addr_t peer_addr;
   int port;
   Messenger::Policy policy;
+  utime_t last_keepalive, last_keepalive_ack;
+  int rx_buffers_version;
+  map<ceph_tid_t, pair<bufferlist, int>> rx_buffers;
+  uint64_t features;
 
   DispatchQueue *dispatch_queue;
 
@@ -382,8 +395,9 @@ class AsyncConnection {
     bool need_queue_reset = (state != STATE_CLOSED) && queue_reset;
     _stop();
     lock.unlock();
-    if (need_queue_reset)
-      dispatch_queue->queue_reset(this);
+    // TODO: call reset on dispatch_queue for each open stream
+    //if (need_queue_reset)
+      //dispatch_queue->queue_reset(this);
   }
   void cleanup() {
     shutdown_socket();
@@ -399,6 +413,37 @@ class AsyncConnection {
   PerfCounters *get_perf_counter() {
     return logger;
   }
+
+  void set_last_keepalive(utime_t t) {
+    std::lock_guard<std::mutex> l(lock);
+    last_keepalive = t;
+  }
+  utime_t get_last_keepalive_ack() {
+    std::lock_guard<std::mutex> l(lock);
+    return last_keepalive_ack;
+  }
+  void set_last_keepalive_ack(utime_t t) {
+    std::lock_guard<std::mutex> l(lock);
+    last_keepalive_ack = t;
+  }
+
+  uint64_t get_features() const { return features; }
+  bool has_feature(uint64_t f) const { return features & f; }
+  bool has_features(uint64_t f) const {
+    return (features & f) == f;
+  }
+  void set_features(uint64_t f) { features = f; }
+  void set_feature(uint64_t f) { features |= f; }
+
+  const entity_addr_t& get_peer_addr() const { return peer_addr; }
+  void set_peer_addr(const entity_addr_t& a) { peer_addr = a; }
+
+  int get_peer_type() const { return peer_type; }
+  void set_peer_type(int t) { peer_type = t; }
+
+  StreamRef create_stream(uint64_t features);
+  StreamRef get_default_stream();
+
 }; /* AsyncConnection */
 
 typedef boost::intrusive_ptr<AsyncConnection> AsyncConnectionRef;
