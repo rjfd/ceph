@@ -271,7 +271,7 @@ AsyncMessenger::AsyncMessenger(CephContext *cct, entity_name_t name,
   stack = single->stack.get();
   stack->start();
   local_worker = stack->get_worker();
-  local_connection = new Stream(this->cct, this);
+  local_connection = new AsyncConnection(cct, this, &dispatch_queue, local_worker);
   init_local_connection();
   reap_handler = new C_handle_reap(this);
   unsigned processor_num = 1;
@@ -289,7 +289,7 @@ AsyncMessenger::~AsyncMessenger()
 {
   delete reap_handler;
   assert(!did_bind); // either we didn't bind or we shut down the Processor
-  local_connection->mark_down();
+  local_stream->mark_down();
   for (auto &&p : processors)
     delete p;
 }
@@ -322,7 +322,7 @@ int AsyncMessenger::shutdown()
     p->stop();
   mark_down_all();
   // break ref cycles on the loopback connection
-  local_connection->set_priv(NULL);
+  local_stream->set_priv(NULL);
   did_bind = false;
   lock.Lock();
   stop_cond.Signal();
@@ -539,26 +539,23 @@ ConnectionRef AsyncMessenger::get_connection(const entity_inst_t& dest)
   Mutex::Locker l(lock);
   if (my_inst.addr == dest.addr) {
     // local
-    return local_connection;
+    return local_stream;
   }
 
   AsyncConnectionRef conn = _lookup_conn(dest.addr);
-  StreamRef stream;
   if (conn) {
-    stream = conn->create_stream(0);
     ldout(cct, 10) << __func__ << " " << dest << " existing " << conn << dendl;
   } else {
     conn = create_connect(dest.addr, dest.name.type());
-    stream = conn->get_default_stream();
     ldout(cct, 10) << __func__ << " " << dest << " new " << conn << dendl;
   }
 
-  return stream;
+  return conn->create_stream(0);
 }
 
 ConnectionRef AsyncMessenger::get_loopback_connection()
 {
-  return local_connection;
+  return local_stream;
 }
 
 int AsyncMessenger::_send_message(Message *m, const entity_inst_t& dest)
@@ -611,7 +608,7 @@ void AsyncMessenger::submit_message(Message *m, AsyncConnectionRef con,
   // local?
   if (my_inst.addr == dest_addr) {
     // local
-    local_connection->send_message(m);
+    local_stream->send_message(m);
     return ;
   }
 

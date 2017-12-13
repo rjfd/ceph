@@ -1,8 +1,17 @@
 #include "Stream.h"
 #include "AsyncConnection.h"
 
-Stream::Stream(CephContext *cct, Messenger *m) :
-  Connection(cct, m), conn(nullptr) {
+#define dout_subsys ceph_subsys_ms
+#undef dout_prefix
+#define dout_prefix _conn_prefix(_dout)
+ostream& Stream::_conn_prefix(std::ostream *_dout) {
+  return *_dout << "-- " << msgr->get_myinst().addr << " >> " << peer_addr << " conn(" << this
+                << ").";
+}
+
+Stream::Stream(AsyncConnection *conn,  uint32_t stream_id) :
+  Connection(conn->get_messenger()->cct, conn->get_messenger()),
+  conn(conn), stream_id(stream_id) {
 }
 
 Stream::~Stream() {
@@ -36,5 +45,11 @@ bool Stream::is_connected() {
   if (!conn)
     return true;
   return conn->is_connected();
+}
+
+int Stream::process_frame(char *paylod, uint32_t len) {
+  ldout(msgr->cct, 10) << __func__ << " processing frame for stream id="
+                       << stream_id << dendl;
+  return 0;
 }
 

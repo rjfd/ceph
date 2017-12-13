@@ -322,7 +322,8 @@ private:
     local_connection->peer_addr = my_inst.addr;
     local_connection->peer_type = my_inst.name.type();
     local_connection->set_features(CEPH_FEATURES_ALL);
-    ms_deliver_handle_fast_connect(local_connection.get());
+    local_stream = local_connection->create_stream(CEPH_FEATURES_ALL);
+    ms_deliver_handle_fast_connect(local_stream.get());
   }
 
   void shutdown_connections(bool queue_reset);
@@ -330,7 +331,8 @@ private:
 public:
 
   /// con used for sending messages to ourselves
-  ConnectionRef local_connection;
+  AsyncConnectionRef local_connection;
+  ConnectionRef local_stream;
 
   /**
    * @defgroup AsyncMessenger internals

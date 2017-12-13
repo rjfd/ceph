@@ -40,6 +40,11 @@ class Worker;
 
 static const int ASYNC_IOV_MAX = (IOV_MAX >= 1024 ? IOV_MAX / 4 : IOV_MAX);
 
+struct FrameHeader {
+  __le32 stream_id;
+  __le32 frame_len;
+};
+
 /*
  * AsyncConnection maintains a logic session between two endpoints. In other
  * word, a pair of addresses can find the only AsyncConnection. AsyncConnection
@@ -234,6 +239,8 @@ class AsyncConnection : public RefCountedObject {
     STATE_OPEN_MESSAGE_READ_FOOTER_AND_DISPATCH,
     STATE_OPEN_TAG_CLOSE,
     STATE_WAIT_SEND,
+    STATE_OPEN_FRAME_READ_HEADER,
+    STATE_OPEN_FRAME_READ_PAYLOAD,
     STATE_CONNECTING,
     STATE_CONNECTING_RE,
     STATE_CONNECTING_WAIT_BANNER_AND_IDENTIFY,
@@ -271,6 +278,8 @@ class AsyncConnection : public RefCountedObject {
                                         "STATE_OPEN_MESSAGE_READ_FOOTER_AND_DISPATCH",
                                         "STATE_OPEN_TAG_CLOSE",
                                         "STATE_WAIT_SEND",
+                                        "STATE_OPEN_FRAME_READ_HEADER",
+                                        "STATE_OPEN_FRAME_READ_PAYLOAD",
                                         "STATE_CONNECTING",
                                         "STATE_CONNECTING_RE",
                                         "STATE_CONNECTING_WAIT_BANNER_AND_IDENTIFY",
@@ -293,8 +302,14 @@ class AsyncConnection : public RefCountedObject {
 
   CephContext *cct;
   AsyncMessenger *async_msgr;
+  enum {
+    STREAM_ID_LEFT = 0,
+    STREAM_ID_RIGHT = 1 << 31,
+  };
+  // this mask is used to make sure that we can generate stream ids
+  // from both sides of this connection without collisions
+  uint32_t stream_id_mask;
   uint32_t stream_counter;
-  map<uint32_t, StreamRef> pending_streams;
   map<uint32_t, StreamRef> streams;
   uint64_t conn_id;
   PerfCounters *logger;
@@ -374,6 +389,8 @@ class AsyncConnection : public RefCountedObject {
   bool is_reset_from_peer;
   bool once_ready;
 
+  // Stores the current frame header info
+  FrameHeader frame_header;
   // used only for local state, it will be overwrite when state transition
   char *state_buffer;
   // used only by "read_until"
@@ -442,7 +459,15 @@ class AsyncConnection : public RefCountedObject {
   void set_peer_type(int t) { peer_type = t; }
 
   StreamRef create_stream(uint64_t features);
-  StreamRef get_default_stream();
+
+  inline uint32_t gen_stream_id() {
+    std::lock_guard<std::mutex> l(lock);
+    auto stream_id = stream_counter++;
+    if (stream_id >= 0x7FFFFFFF) { // 31 bit overflow
+      stream_counter = 0;
+    }
+    return stream_id | stream_id_mask;
+  }
 
 }; /* AsyncConnection */
 

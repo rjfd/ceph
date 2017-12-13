@@ -145,8 +145,6 @@ AsyncConnection::AsyncConnection(CephContext *cct, AsyncMessenger *m, DispatchQu
   recv_buf = new char[2*recv_max_prefetch];
   state_buffer = new char[4096];
   logger->inc(l_msgr_created_connections);
-
-  pending_streams[stream_counter++] = new Stream(cct, m);
 }
 
 AsyncConnection::~AsyncConnection()
@@ -1403,6 +1401,62 @@ void AsyncConnection::process_v2() {
     ldout(async_msgr->cct, 20) << __func__ << " prev state is " << get_state_name(prev_state) << dendl;
     prev_state = state;
     switch (state) {
+      case STATE_OPEN_FRAME_READ_HEADER:
+      {
+        r = read_until(sizeof(FrameHeader), (char *)&frame_header);
+        if (r < 0) {
+          ldout(async_msgr->cct, 1) << __func__ << " read frame header failed"
+                                    << dendl;
+          goto fail;
+        } else if (r > 0) {
+          break;
+        }
+
+        ldout(async_msgr->cct, 20) << __func__ << " read frame header: "
+                                   << "stream_id=" << frame_header.stream_id
+                                   << " frame_len=" << frame_header.frame_len
+                                   << dendl;
+
+        state = STATE_OPEN_FRAME_READ_PAYLOAD;
+        break;
+      }
+      case STATE_OPEN_FRAME_READ_PAYLOAD:
+      {
+        char *payload = new char[frame_header.frame_len];
+        r = read_until(frame_header.frame_len, payload);
+        if (r < 0) {
+          ldout(async_msgr->cct, 1) << __func__ << " read frame payload failed"
+                                    << dendl;
+          goto fail;
+        } else if (r > 0) {
+          break;
+        }
+
+        // At this point we have the full frame contents
+        // we now dispatch the frame to the respective stream
+        StreamRef stream;
+        auto it = streams.find(frame_header.stream_id);
+        if (it == streams.end()) {
+          // new stream
+          ldout(async_msgr->cct, 1) << __func__ << " new stream id="
+                                    << frame_header.stream_id << dendl;
+          stream = new Stream(this, frame_header.stream_id);
+          streams[frame_header.stream_id] = stream;
+        } else {
+          stream = it->second;
+        }
+
+        state = STATE_OPEN_FRAME_READ_HEADER;
+
+        lock.unlock();
+        if (stream->process_frame(payload, frame_header.frame_len) < 0) {
+          lderr(async_msgr->cct) << __func__ << " error processing frame for "
+                                 << " stream id=" << frame_header.stream_id
+                                 << dendl;
+        }
+        lock.lock();
+        break;
+      }
       case STATE_OPEN:
       {
         char tag = -1;
@@ -2075,7 +2129,6 @@ ssize_t AsyncConnection::_process_connection_v2() {
         return 0;
       }
 
-      assert(pending_streams.size() > 0);
       state = STATE_CONNECTING_SEND_CONNECT_MSG;
       break;
     }
@@ -2152,8 +2205,7 @@ ssize_t AsyncConnection::_process_connection_v2() {
       set_peer_addr(peer_addr);  // so that connection_state gets set up
       ldout(async_msgr->cct, 10) << __func__ << " accept peer addr is " << peer_addr << dendl;
 
-      pending_streams[stream_counter++] = new Stream(cct, async_msgr);
-      state = STATE_ACCEPTING_WAIT_CONNECT_MSG;
+      state = STATE_OPEN_FRAME_READ_HEADER;
       break;
     }
 
@@ -2995,6 +3047,7 @@ void AsyncConnection::connect(const entity_addr_t& addr, int type) {
   peer_addr = addr;
   peer_type = type;
   policy = async_msgr->get_policy(type);
+  stream_id_mask = STREAM_ID_LEFT;
   _connect();
 }
 
@@ -3007,6 +3060,7 @@ void AsyncConnection::accept(ConnectedSocket socket, entity_addr_t &addr)
   cs = std::move(socket);
   socket_addr = addr;
   state = STATE_ACCEPTING;
+  stream_id_mask = STREAM_ID_RIGHT;
   // rescheduler connection in order to avoid lock dep
   center->dispatch_event_external(read_handler);
 }
@@ -3647,19 +3701,9 @@ void AsyncConnection::tick(uint64_t id)
 }
 
 StreamRef AsyncConnection::create_stream(uint64_t features) {
-  return boost::intrusive_ptr<Stream>(new Stream(cct, async_msgr));
-}
-
-StreamRef AsyncConnection::get_default_stream() {
   std::lock_guard<std::mutex> l(lock);
-  if (pending_streams.find(0) != pending_streams.end()) {
-    return pending_streams[0];
-  } else {
-    if (streams.find(0) != streams.end()) {
-      return streams[0];
-    }
-  }
-  // stream 0 must always exist
-  assert(false);
+  auto stream_id = gen_stream_id();
+  streams[stream_id] = new Stream(this, stream_id);
+  return streams[stream_id];
 }
 

@@ -13,12 +13,14 @@ class AsyncConnection;
  */
 class Stream : public Connection {
   private:
+    AsyncConnection *conn;
     uint32_t stream_id;
     uint64_t features;
-    AsyncConnection *conn;
+
+    ostream& _conn_prefix(std::ostream *_dout);
 
   public:
-    Stream(CephContext *cct, Messenger *m);
+    Stream(AsyncConnection *conn, uint32_t stream_id);
 
     virtual ~Stream();
 
@@ -31,6 +33,8 @@ class Stream : public Connection {
     virtual void mark_disposable();
 
     virtual bool is_connected();
+
+    int process_frame(char *payload, uint32_t len);
 
 }; /* Stream */
 
