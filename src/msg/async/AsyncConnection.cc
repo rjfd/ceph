@@ -2129,7 +2129,9 @@ ssize_t AsyncConnection::_process_connection_v2() {
         return 0;
       }
 
-      state = STATE_CONNECTING_SEND_CONNECT_MSG;
+      // socket connection is established, streams take control from now
+      _notify_streams_connection_ready();
+      state = STATE_OPEN_FRAME_READ_HEADER;
       break;
     }
 
@@ -2196,7 +2198,6 @@ ssize_t AsyncConnection::_process_connection_v2() {
                                 << peer_required_features << dendl;
 
       // TODO: check if peer_required_features matches our supported_features
-
 
       int port = peer_addr.get_port();
       peer_addr.set_type(entity_addr_t::TYPE_MSGR2);
@@ -2526,8 +2527,8 @@ ssize_t AsyncConnection::_process_stream_v2() {
 }
 
 ssize_t AsyncConnection::_send_banner() {
-  __u32 supported_features = 20;  // Get supported features mask
-  __u32 required_features = 30;  // Get required features mask
+  __u32 supported_features = 0;  // Get supported features mask
+  __u32 required_features = 0;  // Get required features mask
 
   size_t banner_prefix_len = strlen(CEPH_BANNER_V2_PREFIX);
   size_t banner_len = banner_prefix_len + 2 * sizeof(__u32);
@@ -3702,8 +3703,20 @@ void AsyncConnection::tick(uint64_t id)
 
 StreamRef AsyncConnection::create_stream(uint64_t features) {
   std::lock_guard<std::mutex> l(lock);
-  auto stream_id = gen_stream_id();
+  auto stream_id = _gen_stream_id();
   streams[stream_id] = new Stream(this, stream_id);
   return streams[stream_id];
+}
+
+void AsyncConnection::_notify_streams_connection_ready() {
+  std::vector<StreamRef> _streams;
+  for (const auto& p : streams) {
+    _streams.push_back(p.second);
+  }
+  lock.unlock();
+  for (const auto stream : _streams) {
+    stream->connection_ready();
+  }
+  lock.lock();
 }
 

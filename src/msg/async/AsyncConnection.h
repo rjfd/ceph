@@ -54,6 +54,8 @@ struct FrameHeader {
  */
 class AsyncConnection : public RefCountedObject {
 
+  friend class Stream;
+
   ssize_t read_bulk(char *buf, unsigned len);
   ssize_t do_sendmsg(struct msghdr &msg, unsigned len, bool more);
   ssize_t try_send(bufferlist &bl, bool more=false) {
@@ -399,6 +401,17 @@ class AsyncConnection : public RefCountedObject {
   EventCenter *center;
   ceph::shared_ptr<AuthSessionHandler> session_security;
 
+  inline uint32_t _gen_stream_id() {
+    // requires lock to be hold
+    auto stream_id = stream_counter++;
+    if (stream_id >= 0x7FFFFFFF) { // 31 bit overflow
+      stream_counter = 0;
+    }
+    return stream_id | stream_id_mask;
+  }
+
+  void _notify_streams_connection_ready();
+
  public:
   // used by eventcallback
   void handle_write();
@@ -459,15 +472,6 @@ class AsyncConnection : public RefCountedObject {
   void set_peer_type(int t) { peer_type = t; }
 
   StreamRef create_stream(uint64_t features);
-
-  inline uint32_t gen_stream_id() {
-    std::lock_guard<std::mutex> l(lock);
-    auto stream_id = stream_counter++;
-    if (stream_id >= 0x7FFFFFFF) { // 31 bit overflow
-      stream_counter = 0;
-    }
-    return stream_id | stream_id_mask;
-  }
 
 }; /* AsyncConnection */
 
