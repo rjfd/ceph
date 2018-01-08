@@ -16,8 +16,8 @@ class AsyncConnection;
 class Stream : public Connection {
   private:
     enum class State : int {
-      STATE_NEW_STREAM,
-      STATE_WAITING_AUTH_SETUP,
+      STATE_SERVER_WAITING_AUTH_SETUP,
+      STATE_CLIENT_WAITING_AUTH_SETUP,
       STATE_SET_AUTH_METHOD
     };
 
@@ -26,6 +26,12 @@ class Stream : public Connection {
       TAG_AUTH_METHODS,
       TAG_AUTH_SET_METHOD,
       TAG_AUTH_BAD_METHOD
+    };
+
+    struct TagMsg {
+      Tag tag;
+      char *payload;
+      uint32_t len;
     };
 
     AsyncConnection *conn;
@@ -38,13 +44,20 @@ class Stream : public Connection {
 
     ostream& _conn_prefix(std::ostream *_dout);
 
-    void execute_state();
-    void process_message(Tag tag, char *payload, uint32_t len);
+    void execute_server_waiting_auth_setup_state(TagMsg &msg);
+    void execute_client_waiting_auth_setup_state(TagMsg &msg);
+
+    void process_message(TagMsg &msg);
     int send_message(Tag tag, char *payload, uint32_t len);
 
+    void send_new_stream();
     void send_auth_methods();
-    void send_set_auth_method(__le32 *allowed_methods, uint32_t len);
+    void send_set_auth_method(__le32 *allowed_methods, uint32_t num_methods);
+
+    void handle_auth_methods(__le32 *allowed_methods, uint32_t num_methods);
     void handle_auth_set_method(__le32 method);
+    void handle_auth_bad_method(__le32 method, __le32 num_methods,
+                                __le32 *allowed_methods);
 
   public:
     Stream(AsyncConnection *conn, uint32_t stream_id);
