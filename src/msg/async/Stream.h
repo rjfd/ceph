@@ -14,15 +14,12 @@ class AsyncConnection;
  * A stream is associated with a single connection
  */
 class Stream : public Connection {
-  private:
+  protected:
     enum class State : int {
-      STATE_SERVER_WAITING_AUTH_SETUP,
-      STATE_CLIENT_WAITING_AUTH_SETUP,
-      STATE_SET_AUTH_METHOD
+      STATE_WAITING_AUTH_SETUP
     };
 
     enum class Tag : char {
-      TAG_NEW_STREAM = 0,
       TAG_AUTH_METHODS,
       TAG_AUTH_SET_METHOD,
       TAG_AUTH_BAD_METHOD
@@ -44,20 +41,9 @@ class Stream : public Connection {
 
     ostream& _conn_prefix(std::ostream *_dout);
 
-    void execute_server_waiting_auth_setup_state(TagMsg &msg);
-    void execute_client_waiting_auth_setup_state(TagMsg &msg);
-
-    void process_message(TagMsg &msg);
     int send_message(Tag tag, char *payload, uint32_t len);
 
-    void send_new_stream();
-    void send_auth_methods();
-    void send_set_auth_method(__le32 *allowed_methods, uint32_t num_methods);
-
-    void handle_auth_methods(__le32 *allowed_methods, uint32_t num_methods);
-    void handle_auth_set_method(__le32 method);
-    void handle_auth_bad_method(__le32 method, __le32 num_methods,
-                                __le32 *allowed_methods);
+    virtual void process_message(TagMsg &msg) = 0;
 
   public:
     Stream(AsyncConnection *conn, uint32_t stream_id);
@@ -76,7 +62,7 @@ class Stream : public Connection {
 
     int process_frame(char *payload, uint32_t len);
 
-    void connection_ready();
+    virtual void connection_ready();
 
 }; /* Stream */
 

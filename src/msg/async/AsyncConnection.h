@@ -33,7 +33,8 @@
 
 #include "Event.h"
 #include "Stack.h"
-#include "Stream.h"
+#include "ServerStream.h"
+#include "ClientStream.h"
 
 class AsyncMessenger;
 class Worker;

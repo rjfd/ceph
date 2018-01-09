@@ -477,6 +477,8 @@ set(libcommon_files
   msg/async/EventSelect.cc
   msg/async/Stack.cc
   msg/async/Stream.cc
+  msg/async/ServerStream.cc
+  msg/async/ClientStream.cc
   msg/async/PosixStack.cc
   msg/async/net_handler.cc
   msg/QueueStrategy.cc

@@ -1440,7 +1440,7 @@ void AsyncConnection::process_v2() {
           // new stream
           ldout(async_msgr->cct, 1) << __func__ << " new stream id="
                                     << frame_header.stream_id << dendl;
-          stream = new Stream(this, frame_header.stream_id);
+          stream = new ServerStream(this, frame_header.stream_id);
           streams[frame_header.stream_id] = stream;
         } else {
           stream = it->second;
@@ -3704,7 +3704,7 @@ void AsyncConnection::tick(uint64_t id)
 StreamRef AsyncConnection::create_stream(uint64_t features) {
   std::lock_guard<std::mutex> l(lock);
   auto stream_id = _gen_stream_id();
-  streams[stream_id] = new Stream(this, stream_id);
+  streams[stream_id] = new ClientStream(this, stream_id);
   return streams[stream_id];
 }
 
