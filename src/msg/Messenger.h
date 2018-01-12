@@ -860,6 +860,21 @@ public:
   }
 
   /**
+   * Returns the list of allowed authentication methods for a specific peer
+   * type.
+   *
+   * @param peer_type The type of the endpoint
+   * @param methods the array holding the list of available methods
+   */
+  void ms_deliver_get_allowed_auth_methods(int peer_type,
+                                           std::vector<uint32_t>& methods) {
+    auto disp = dispatchers.begin();
+    if (disp != dispatchers.end()) {
+      (*disp)->ms_get_allowed_auth_methods(peer_type, methods);
+    }
+  }
+
+  /**
    * @} // Dispatcher Interfacing
    */
 };

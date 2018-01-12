@@ -68,10 +68,18 @@ class AsyncConnection : public RefCountedObject {
   ssize_t _send(Message *m);
   void prepare_send_message(uint64_t features, Message *m, bufferlist &bl);
   ssize_t read_until(unsigned needed, char *p);
+
   ssize_t _send_banner();
+  ssize_t _send_auth_frame(char tag, char *payload, uint32_t len);
+  ssize_t _send_set_auth_method(std::vector<uint32_t> allowed_methods);
+  ssize_t _send_auth_payload();
+  ssize_t _handle_set_auth_method(uint32_t method);
+  ssize_t _handle_bad_auth_method(uint32_t method,
+                                  std::vector<uint32_t> allowed_methods);
+  ssize_t _handle_auth_request(bufferlist& auth_block);
+
   ssize_t _process_connection();
   ssize_t _process_connection_v2();
-  ssize_t _process_stream_v2();
   void _connect();
   void _stop();
   int handle_connect_reply(ceph_msg_connect &connect, ceph_msg_connect_reply &r);
@@ -212,7 +220,7 @@ class AsyncConnection : public RefCountedObject {
 
   // Only call when AsyncConnection first construct
   void connect(const entity_addr_t& addr, int type);
-    
+
   // Only call when AsyncConnection first construct
   void accept(ConnectedSocket socket, entity_addr_t &addr);
   int send_message(Message *m);
@@ -223,7 +231,7 @@ class AsyncConnection : public RefCountedObject {
     std::lock_guard<std::mutex> l(lock);
     policy.lossy = true;
   }
-  
+
  private:
   enum {
     STATE_NONE,
@@ -242,8 +250,6 @@ class AsyncConnection : public RefCountedObject {
     STATE_OPEN_MESSAGE_READ_FOOTER_AND_DISPATCH,
     STATE_OPEN_TAG_CLOSE,
     STATE_WAIT_SEND,
-    STATE_OPEN_FRAME_READ_HEADER,
-    STATE_OPEN_FRAME_READ_PAYLOAD,
     STATE_CONNECTING,
     STATE_CONNECTING_RE,
     STATE_CONNECTING_WAIT_BANNER_AND_IDENTIFY,
@@ -261,6 +267,16 @@ class AsyncConnection : public RefCountedObject {
     STATE_STANDBY,
     STATE_CLOSED,
     STATE_WAIT,       // just wait for racing connection
+    // v2 specific states
+    STATE_CONNECTING_SEND_AUTH_SET,
+    STATE_CONNECTING_SEND_AUTH_PAYLOAD,
+    STATE_CONNECTING_WAIT_AUTH_REPLY,
+    STATE_ACCEPTING_WAIT_AUTH_SET,
+    STATE_ACCEPTING_WAIT_AUTH_REQUEST,
+    STATE_OPEN_AUTH_FRAME_READ_HEADER,
+    STATE_OPEN_AUTH_FRAME_READ_PAYLOAD,
+    STATE_OPEN_FRAME_READ_HEADER,
+    STATE_OPEN_FRAME_READ_PAYLOAD
   };
 
   static const int TCP_PREFETCH_MIN_SIZE;
@@ -281,8 +297,6 @@ class AsyncConnection : public RefCountedObject {
                                         "STATE_OPEN_MESSAGE_READ_FOOTER_AND_DISPATCH",
                                         "STATE_OPEN_TAG_CLOSE",
                                         "STATE_WAIT_SEND",
-                                        "STATE_OPEN_FRAME_READ_HEADER",
-                                        "STATE_OPEN_FRAME_READ_PAYLOAD",
                                         "STATE_CONNECTING",
                                         "STATE_CONNECTING_RE",
                                         "STATE_CONNECTING_WAIT_BANNER_AND_IDENTIFY",
@@ -299,7 +313,17 @@ class AsyncConnection : public RefCountedObject {
                                         "STATE_ACCEPTING_READY",
                                         "STATE_STANDBY",
                                         "STATE_CLOSED",
-                                        "STATE_WAIT"};
+                                        "STATE_WAIT",
+                                        "STATE_CONNECTING_SEND_AUTH_SET",
+                                        "STATE_CONNECTING_WAIT_AUTH_REPLY",
+                                        "STATE_CONNECTING_SEND_AUTH_PAYLOAD",
+                                        "STATE_ACCEPTING_WAIT_AUTH_SET",
+                                        "STATE_ACCEPTING_WAIT_AUTH_REQUEST",
+                                        "STATE_OPEN_AUTH_FRAME_READ_HEADER",
+                                        "STATE_OPEN_AUTH_FRAME_READ_PAYLOAD",
+                                        "STATE_OPEN_FRAME_READ_HEADER",
+                                        "STATE_OPEN_FRAME_READ_PAYLOAD"
+      };
       return statenames[state];
   }
 
@@ -377,6 +401,7 @@ class AsyncConnection : public RefCountedObject {
   ceph_msg_connect connect_msg;
   // Connecting state
   bool got_bad_auth;
+  int accepted_auth_method;
   AuthAuthorizer *authorizer;
   bufferlist authorizer_buf;
   ceph_msg_connect_reply connect_reply;
@@ -392,6 +417,9 @@ class AsyncConnection : public RefCountedObject {
   bool is_reset_from_peer;
   bool once_ready;
 
+  // Stores the current auth frame header
+  __le32 auth_frame_header;
+  char *auth_frame_payload;
   // Stores the current frame header info
   FrameHeader frame_header;
   // used only for local state, it will be overwrite when state transition

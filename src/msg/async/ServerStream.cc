@@ -19,6 +19,9 @@ void ServerStream::process_message(TagMsg &msg) {
     case State::STATE_WAITING_AUTH_SETUP:
       execute_waiting_auth_setup_state(msg);
       break;
+    case State::STATE_AUTH_SETUP:
+      execute_auth_setup_state(msg);
+      break;
     default:
       break;
   }
@@ -33,6 +36,24 @@ void ServerStream::execute_waiting_auth_setup_state(TagMsg &msg) {
       handle_auth_set_method(*(__le32 *)msg.payload);
       break;
     default:
+      ldout(msgr->cct, 1) << __func__ << " dropping message tag="
+                          << (int)msg.tag << " payload_len=" << msg.len
+                          << dendl;
+      break;
+  }
+}
+
+void ServerStream::execute_auth_setup_state(TagMsg &msg) {
+  ldout(msgr->cct, 1) << __func__ << " tag=" << (int)msg.tag << " payload_len="
+                      << msg.len << dendl;
+
+  switch(msg.tag) {
+    case Tag::TAG_AUTH_REQUEST:
+      break;
+    default:
+      ldout(msgr->cct, 1) << __func__ << " dropping message tag="
+                          << (int)msg.tag << " payload_len=" << msg.len
+                          << dendl;
       break;
   }
 }
@@ -59,5 +80,6 @@ void ServerStream::handle_auth_set_method(__le32 method) {
                       << dendl;
   std::lock_guard<std::mutex> l(lock);
   auth_method = method;
+  state = State::STATE_AUTH_SETUP;
 }
 

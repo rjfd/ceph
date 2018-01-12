@@ -17,6 +17,7 @@
 
 #include "msg/Dispatcher.h"
 #include "msg/Messenger.h"
+#include "auth/Auth.h"
 
 class SimpleDispatcher: public Dispatcher {
 private:
@@ -95,7 +96,21 @@ public:
    * @return True if this function call properly filled in *a, false otherwise.
    */
   bool ms_get_authorizer(int dest_type, AuthAuthorizer **a,
-				 bool force_new) override { return false; };
+				 bool force_new) override {
+
+    struct MyAuthMethod : public AuthAuthorizer {
+
+      MyAuthMethod() : AuthAuthorizer(CEPH_AUTH_CEPHX) {
+        char data[] = {1, 2, 4, 5, 6};
+        bl.append(data);
+      }
+      virtual bool verify_reply(bufferlist::iterator& reply) {
+        return true;
+      }
+    };
+    *a = new MyAuthMethod();
+    return true;
+  };
 
   /**
    * Verify the authorizer for a new incoming Connection.
@@ -120,6 +135,13 @@ public:
     isvalid = true;
     return true;
   };
+
+
+  void ms_get_allowed_auth_methods(int peer_type,
+                                   std::vector<uint32_t> &methods) override {
+    methods.push_back(CEPH_AUTH_CEPHX);
+  }
+
 
 };
 

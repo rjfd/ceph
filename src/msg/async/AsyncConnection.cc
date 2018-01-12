@@ -133,7 +133,8 @@ AsyncConnection::AsyncConnection(CephContext *cct, AsyncMessenger *m, DispatchQu
     recv_start(0), recv_end(0),
     last_active(ceph::coarse_mono_clock::now()),
     inactive_timeout_us(cct->_conf->ms_tcp_read_timeout*1000*1000),
-    msg_left(0), cur_msg_size(0), got_bad_auth(false), authorizer(NULL), replacing(false),
+    msg_left(0), cur_msg_size(0), got_bad_auth(false), accepted_auth_method(-1),
+    authorizer(NULL), replacing(false),
     is_reset_from_peer(false), once_ready(false), state_buffer(NULL), state_offset(0),
     worker(w), center(&w->center)
 {
@@ -1454,7 +1455,65 @@ void AsyncConnection::process_v2() {
                                  << " stream id=" << frame_header.stream_id
                                  << dendl;
         }
+        delete payload;
         lock.lock();
+        break;
+      }
+      case STATE_OPEN_AUTH_FRAME_READ_HEADER:
+      {
+        r = read_until(sizeof(__le32), (char *)&auth_frame_header);
+        if (r < 0) {
+          ldout(async_msgr->cct, 1) << __func__ << " read auth frame header "
+                                    << "failed" << dendl;
+          goto fail;
+        } else if (r > 0) {
+          break;
+        }
+
+        ldout(async_msgr->cct, 20) << __func__ << " read auth frame header: "
+                                   << " frame_len=" << auth_frame_header
+                                   << dendl;
+
+        state = STATE_OPEN_AUTH_FRAME_READ_PAYLOAD;
+        break;
+      }
+      case STATE_OPEN_AUTH_FRAME_READ_PAYLOAD:
+      {
+        char *payload = new char[auth_frame_header];
+        r = read_until(auth_frame_header, payload);
+        if (r < 0) {
+          ldout(async_msgr->cct, 1) << __func__ << " read auth frame payload "
+                                    << "failed" << dendl;
+          goto fail;
+        } else if (r > 0) {
+          break;
+        }
+
+        char tag = payload[0];
+        auth_frame_payload = payload+1;
+        switch(tag) {
+          case CEPH_MSGR_TAG_SET_AUTH_METHOD:
+          {
+            state = STATE_ACCEPTING_WAIT_AUTH_SET;
+            break;
+          }
+          case CEPH_MSGR_TAG_BAD_AUTH_METHOD:
+          {
+            state = STATE_CONNECTING_WAIT_AUTH_REPLY;
+            break;
+          }
+          case CEPH_MSGR_TAG_AUTH_REQUEST:
+          {
+            state = STATE_ACCEPTING_WAIT_AUTH_REQUEST;
+            break;
+          }
+          default:
+          {
+            delete auth_frame_payload;
+            break;
+          }
+        }
+
         break;
       }
       case STATE_OPEN:
@@ -2079,7 +2138,7 @@ ssize_t AsyncConnection::_process_connection_v2() {
       }
 
       if (memcmp(state_buffer, CEPH_BANNER_V2_PREFIX, banner_prefix_len)) {
-        if (memcmp(state_buffer, CEPH_BANNER, strlen(CEPH_BANNER))) {
+        if (!memcmp(state_buffer, CEPH_BANNER, strlen(CEPH_BANNER))) {
           lderr(async_msgr->cct) << __func__ << " peer " << get_peer_addr()
                                  << " is using msgr V1 protocol" << dendl;
           goto fail;
@@ -2130,11 +2189,78 @@ ssize_t AsyncConnection::_process_connection_v2() {
       }
 
       // socket connection is established, streams take control from now
-      _notify_streams_connection_ready();
-      state = STATE_OPEN_FRAME_READ_HEADER;
+      //_notify_streams_connection_ready();
+      state = STATE_CONNECTING_SEND_AUTH_SET;
       break;
     }
-
+    case STATE_CONNECTING_SEND_AUTH_SET:
+    {
+      delete authorizer;
+      authorizer = async_msgr->get_authorizer(peer_type, false);
+      std::vector<uint32_t> empty;
+      r = _send_set_auth_method(empty);
+      if (r == 0) {
+        ldout(async_msgr->cct, 10) << __func__ << " set auth method sent"
+                                   << dendl;
+        state = STATE_CONNECTING_SEND_AUTH_PAYLOAD;
+      } else if (r > 0) {
+        ldout(async_msgr->cct, 10) << __func__ << " waiting for auth method "
+                                   << "to be sent" << dendl;
+        state = STATE_WAIT_SEND;
+        state_after_send = STATE_CONNECTING_SEND_AUTH_PAYLOAD;
+      } else {
+        goto fail;
+      }
+      break;
+    }
+    case STATE_CONNECTING_SEND_AUTH_PAYLOAD:
+    {
+      if (!authorizer) {
+        state = STATE_OPEN_AUTH_FRAME_READ_HEADER;
+        break;
+      }
+      r = _send_auth_payload();
+      if (r == 0) {
+        ldout(async_msgr->cct, 1) << __func__ << " auth payload sent"
+                                   << dendl;
+        state = STATE_OPEN_AUTH_FRAME_READ_HEADER;
+      } else if (r > 0) {
+        ldout(async_msgr->cct, 1) << __func__ << " waiting for auth payload "
+                                   << "to be sent" << dendl;
+        state = STATE_WAIT_SEND;
+        state_after_send = STATE_OPEN_AUTH_FRAME_READ_HEADER;
+      } else {
+        goto fail;
+      }
+      break;
+    }
+    case STATE_CONNECTING_WAIT_AUTH_REPLY:
+    {
+      __le32 method;
+      __le32 num_methods;
+      std::vector<uint32_t> allowed_methods;
+      memcpy(&method, auth_frame_payload, sizeof(__le32));
+      memcpy(&num_methods, auth_frame_payload+sizeof(__le32), sizeof(__le32));
+      __le32 *a_methods = (__le32 *)(auth_frame_payload+(sizeof(__le32)*2));
+      for (__le32 i=0; i < num_methods; i++) {
+        allowed_methods.push_back(a_methods[i]);
+      }
+      delete (auth_frame_payload-1);
+      r = _handle_bad_auth_method(method, allowed_methods);
+      if (r == 0) {
+        ldout(async_msgr->cct, 10) << __func__ << " set auth method sent"
+                                   << dendl;
+        state = STATE_OPEN_AUTH_FRAME_READ_HEADER;
+      } else if (r > 0) {
+        ldout(async_msgr->cct, 10) << __func__ << " waiting for auth method "
+                                   << "to be sent" << dendl;
+        state = STATE_WAIT_SEND;
+        state_after_send = STATE_OPEN_AUTH_FRAME_READ_HEADER;
+      } else {
+        goto fail;
+      }
+      break;
+    }
     case STATE_ACCEPTING:
     {
       center->create_file_event(cs.fd(), EVENT_READABLE, read_handler);
@@ -2206,321 +2332,65 @@ ssize_t AsyncConnection::_process_connection_v2() {
       set_peer_addr(peer_addr);  // so that connection_state gets set up
       ldout(async_msgr->cct, 10) << __func__ << " accept peer addr is " << peer_addr << dendl;
 
-      state = STATE_OPEN_FRAME_READ_HEADER;
+      state = STATE_OPEN_AUTH_FRAME_READ_HEADER;
       break;
     }
+    case STATE_ACCEPTING_WAIT_AUTH_SET:
+    {
+      ldout(async_msgr->cct, 1) << __func__ << " handle auth_set_method method="
+                                << (int)*(__le32*)auth_frame_payload
+                                << dendl;
+      r = _handle_set_auth_method((uint32_t)*(__le32*)auth_frame_payload);
+      delete (auth_frame_payload-1);
+      if (r == 0) {
+        state = STATE_OPEN_AUTH_FRAME_READ_HEADER;
+        ldout(async_msgr->cct, 1) << __func__ << " handled set_auth_method, "
+                                  << "accepted method="
+                                  << accepted_auth_method << dendl;
+      } else if (r > 0) {
+        state = STATE_WAIT_SEND;
+        state_after_send = STATE_OPEN_AUTH_FRAME_READ_HEADER;
+        ldout(async_msgr->cct, 1) << __func__ << " wait for send allowed auth"
+                                  << " methods" << dendl;
+      } else {
+        goto fail;
+      }
 
+      if (r < 0) {
+        goto fail;
+      }
+      break;
+    }
+    case STATE_ACCEPTING_WAIT_AUTH_REQUEST:
+    {
+      if (accepted_auth_method == -1) {
+        // ignoring auth request
+        ldout(async_msgr->cct, 1) << __func__ << " ignoring auth request, "
+                                  << "method not allowed" << dendl;
+        delete (auth_frame_payload-1);
+        break;
+      }
+
+      ldout(async_msgr->cct, 1) << __func__ << " auth payload received len="
+                                << *(__le32 *)auth_frame_payload << dendl;
+      lock.unlock();
+
+      uint32_t block_len = *(__le32 *)auth_frame_payload;
+      bufferlist auth_block;
+      auth_block.append(auth_frame_payload+sizeof(__le32), block_len);
+      delete (auth_frame_payload-1);
+      _handle_auth_request(auth_block);
+
+      lock.lock();
+      break;
+    }
     default:
     {
-      if (_process_stream_v2() < 0)
-        goto fail;
       break;
     }
   }
 
   return 0;
-
-  fail:
-  return -1;
-}
-
-ssize_t AsyncConnection::_process_stream_v2() {
-  ssize_t r = 0;
-
-  switch(state) {
-    case STATE_CONNECTING_SEND_CONNECT_MSG:
-    {
-      if (!got_bad_auth) {
-        delete authorizer;
-        authorizer = async_msgr->get_authorizer(peer_type, false);
-      }
-      bufferlist bl;
-
-      connect_msg.features = policy.features_supported;
-      connect_msg.host_type = async_msgr->get_myinst().name.type();
-      connect_msg.global_seq = global_seq;
-      connect_msg.connect_seq = connect_seq;
-      connect_msg.protocol_version = async_msgr->get_proto_version(peer_type, true);
-      connect_msg.authorizer_protocol = authorizer ? authorizer->protocol : 0;
-      connect_msg.authorizer_len = authorizer ? authorizer->bl.length() : 0;
-      if (authorizer)
-        ldout(async_msgr->cct, 10) << __func__ <<  " connect_msg.authorizer_len="
-                                   << connect_msg.authorizer_len << " protocol="
-                                   << connect_msg.authorizer_protocol << dendl;
-      connect_msg.flags = 0;
-      if (policy.lossy)
-        connect_msg.flags |= CEPH_MSG_CONNECT_LOSSY;  // this is fyi, actually, server decides!
-      bl.append((char*)&connect_msg, sizeof(connect_msg));
-      if (authorizer) {
-        bl.append(authorizer->bl.c_str(), authorizer->bl.length());
-      }
-      ldout(async_msgr->cct, 10) << __func__ << " connect sending gseq=" << global_seq << " cseq="
-                                 << connect_seq << " proto=" << connect_msg.protocol_version << dendl;
-
-      r = try_send(bl);
-      if (r == 0) {
-        state = STATE_CONNECTING_WAIT_CONNECT_REPLY;
-        ldout(async_msgr->cct,20) << __func__ << " connect wrote (self +) cseq, waiting for reply" << dendl;
-      } else if (r > 0) {
-        state = STATE_WAIT_SEND;
-        state_after_send = STATE_CONNECTING_WAIT_CONNECT_REPLY;
-        ldout(async_msgr->cct, 10) << __func__ << " continue send reply " << dendl;
-      } else {
-        ldout(async_msgr->cct, 2) << __func__ << " connect couldn't send reply "
-                                  << cpp_strerror(r) << dendl;
-        goto fail;
-      }
-
-      break;
-    }
-
-    case STATE_CONNECTING_WAIT_CONNECT_REPLY:
-    {
-      r = read_until(sizeof(connect_reply), state_buffer);
-      if (r < 0) {
-        ldout(async_msgr->cct, 1) << __func__ << " read connect reply failed" << dendl;
-        goto fail;
-      } else if (r > 0) {
-        break;
-      }
-
-      connect_reply = *((ceph_msg_connect_reply*)state_buffer);
-
-      ldout(async_msgr->cct, 20) << __func__ << " connect got reply tag " << (int)connect_reply.tag
-                                 << " connect_seq " << connect_reply.connect_seq << " global_seq "
-                                 << connect_reply.global_seq << " proto " << connect_reply.protocol_version
-                                 << " flags " << (int)connect_reply.flags << " features "
-                                 << connect_reply.features << dendl;
-      state = STATE_CONNECTING_WAIT_CONNECT_REPLY_AUTH;
-
-      break;
-    }
-
-    case STATE_CONNECTING_WAIT_CONNECT_REPLY_AUTH:
-    {
-      bufferlist authorizer_reply;
-      if (connect_reply.authorizer_len) {
-        ldout(async_msgr->cct, 10) << __func__ << " reply.authorizer_len=" << connect_reply.authorizer_len << dendl;
-        assert(connect_reply.authorizer_len < 4096);
-        r = read_until(connect_reply.authorizer_len, state_buffer);
-        if (r < 0) {
-          ldout(async_msgr->cct, 1) << __func__ << " read connect reply authorizer failed" << dendl;
-          goto fail;
-        } else if (r > 0) {
-          break;
-        }
-
-        authorizer_reply.append(state_buffer, connect_reply.authorizer_len);
-        bufferlist::iterator iter = authorizer_reply.begin();
-        if (authorizer && !authorizer->verify_reply(iter)) {
-          ldout(async_msgr->cct, 0) << __func__ << " failed verifying authorize reply" << dendl;
-          goto fail;
-        }
-      }
-      r = handle_connect_reply(connect_msg, connect_reply);
-      if (r < 0)
-        goto fail;
-
-      // state must be changed!
-      assert(state != STATE_CONNECTING_WAIT_CONNECT_REPLY_AUTH);
-      break;
-    }
-
-    case STATE_CONNECTING_WAIT_ACK_SEQ:
-    {
-      uint64_t newly_acked_seq = 0;
-
-      r = read_until(sizeof(newly_acked_seq), state_buffer);
-      if (r < 0) {
-        ldout(async_msgr->cct, 1) << __func__ << " read connect ack seq failed" << dendl;
-        goto fail;
-      } else if (r > 0) {
-        break;
-      }
-
-      newly_acked_seq = *((uint64_t*)state_buffer);
-      ldout(async_msgr->cct, 2) << __func__ << " got newly_acked_seq " << newly_acked_seq
-                                << " vs out_seq " << out_seq << dendl;
-      discard_requeued_up_to(newly_acked_seq);
-      //while (newly_acked_seq > out_seq.read()) {
-      //  Message *m = _get_next_outgoing(NULL);
-      //  assert(m);
-      //  ldout(async_msgr->cct, 2) << __func__ << " discarding previously sent " << m->get_seq()
-      //                      << " " << *m << dendl;
-      //  assert(m->get_seq() <= newly_acked_seq);
-      //  m->put();
-      //  out_seq.inc();
-      //}
-
-      bufferlist bl;
-      uint64_t s = in_seq;
-      bl.append((char*)&s, sizeof(s));
-      r = try_send(bl);
-      if (r == 0) {
-        state = STATE_CONNECTING_READY;
-        ldout(async_msgr->cct, 10) << __func__ << " send in_seq done " << dendl;
-      } else if (r > 0) {
-        state_after_send = STATE_CONNECTING_READY;
-        state = STATE_WAIT_SEND;
-        ldout(async_msgr->cct, 10) << __func__ << " continue send in_seq " << dendl;
-      } else {
-        goto fail;
-      }
-      break;
-    }
-
-    case STATE_CONNECTING_READY:
-    {
-      // hooray!
-      peer_global_seq = connect_reply.global_seq;
-      policy.lossy = connect_reply.flags & CEPH_MSG_CONNECT_LOSSY;
-      state = STATE_OPEN;
-      once_ready = true;
-      connect_seq += 1;
-      assert(connect_seq == connect_reply.connect_seq);
-      backoff = utime_t();
-      set_features((uint64_t)connect_reply.features & (uint64_t)connect_msg.features);
-      ldout(async_msgr->cct, 10) << __func__ << " connect success " << connect_seq
-                                 << ", lossy = " << policy.lossy << ", features "
-                                 << get_features() << dendl;
-
-      // If we have an authorizer, get a new AuthSessionHandler to deal with ongoing security of the
-      // connection.  PLR
-      if (authorizer != NULL) {
-        session_security.reset(
-            get_auth_session_handler(async_msgr->cct,
-                                     authorizer->protocol,
-                                     authorizer->session_key,
-                                     get_features()));
-      } else {
-        // We have no authorizer, so we shouldn't be applying security to messages in this AsyncConnection.  PLR
-        session_security.reset();
-      }
-
-      if (delay_state)
-        assert(delay_state->ready());
-      // TODO: call this on stream
-      //dispatch_queue->queue_connect(this);
-      //async_msgr->ms_deliver_handle_fast_connect(this);
-
-      // make sure no pending tick timer
-      if (last_tick_id)
-        center->delete_time_event(last_tick_id);
-      last_tick_id = center->create_time_event(inactive_timeout_us, tick_handler);
-
-      // message may in queue between last _try_send and connection ready
-      // write event may already notify and we need to force scheduler again
-      write_lock.lock();
-      can_write = WriteStatus::CANWRITE;
-      if (is_queued())
-        center->dispatch_event_external(write_handler);
-      write_lock.unlock();
-      maybe_start_delay_thread();
-      break;
-    }
-
-    case STATE_ACCEPTING_WAIT_CONNECT_MSG:
-    {
-      r = read_until(sizeof(connect_msg), state_buffer);
-      if (r < 0) {
-        ldout(async_msgr->cct, 1) << __func__ << " read connect msg failed" << dendl;
-        goto fail;
-      } else if (r > 0) {
-        break;
-      }
-
-      connect_msg = *((ceph_msg_connect*)state_buffer);
-      state = STATE_ACCEPTING_WAIT_CONNECT_MSG_AUTH;
-      break;
-    }
-
-    case STATE_ACCEPTING_WAIT_CONNECT_MSG_AUTH:
-    {
-      bufferlist authorizer_reply;
-
-      if (connect_msg.authorizer_len) {
-        if (!authorizer_buf.length())
-          authorizer_buf.push_back(buffer::create(connect_msg.authorizer_len));
-
-        r = read_until(connect_msg.authorizer_len, authorizer_buf.c_str());
-        if (r < 0) {
-          ldout(async_msgr->cct, 1) << __func__ << " read connect authorizer failed" << dendl;
-          goto fail;
-        } else if (r > 0) {
-          break;
-        }
-      }
-
-      ldout(async_msgr->cct, 20) << __func__ << " accept got peer connect_seq "
-                                 << connect_msg.connect_seq << " global_seq "
-                                 << connect_msg.global_seq << dendl;
-      set_peer_type(connect_msg.host_type);
-      policy = async_msgr->get_policy(connect_msg.host_type);
-      ldout(async_msgr->cct, 10) << __func__ << " accept of host_type " << connect_msg.host_type
-                                 << ", policy.lossy=" << policy.lossy << " policy.server="
-                                 << policy.server << " policy.standby=" << policy.standby
-                                 << " policy.resetcheck=" << policy.resetcheck << dendl;
-
-      r = handle_connect_msg(connect_msg, authorizer_buf, authorizer_reply);
-      if (r < 0)
-        goto fail;
-
-      // state is changed by "handle_connect_msg"
-      assert(state != STATE_ACCEPTING_WAIT_CONNECT_MSG_AUTH);
-      break;
-    }
-
-    case STATE_ACCEPTING_WAIT_SEQ:
-    {
-      uint64_t newly_acked_seq;
-      r = read_until(sizeof(newly_acked_seq), state_buffer);
-      if (r < 0) {
-        ldout(async_msgr->cct, 1) << __func__ << " read ack seq failed" << dendl;
-        goto fail_registered;
-      } else if (r > 0) {
-        break;
-      }
-
-      newly_acked_seq = *((uint64_t*)state_buffer);
-      ldout(async_msgr->cct, 2) << __func__ << " accept get newly_acked_seq " << newly_acked_seq << dendl;
-      discard_requeued_up_to(newly_acked_seq);
-      state = STATE_ACCEPTING_READY;
-      break;
-    }
-
-    case STATE_ACCEPTING_READY:
-    {
-      ldout(async_msgr->cct, 20) << __func__ << " accept done" << dendl;
-      state = STATE_OPEN;
-      memset(&connect_msg, 0, sizeof(connect_msg));
-
-      if (delay_state)
-        assert(delay_state->ready());
-      // make sure no pending tick timer
-      if (last_tick_id)
-        center->delete_time_event(last_tick_id);
-      last_tick_id = center->create_time_event(inactive_timeout_us, tick_handler);
-
-      write_lock.lock();
-      can_write = WriteStatus::CANWRITE;
-      if (is_queued())
-        center->dispatch_event_external(write_handler);
-      write_lock.unlock();
-      maybe_start_delay_thread();
-      break;
-    }
-
-    default:
-    {
-      lderr(async_msgr->cct) << __func__ << " bad state: " << state << dendl;
-      ceph_abort();
-    }
-  }
-  return 0;
-
-  fail_registered:
-  ldout(async_msgr->cct, 10) << "accept fault after register" << dendl;
-  inject_delay();
 
   fail:
   return -1;
@@ -2543,6 +2413,130 @@ ssize_t AsyncConnection::_send_banner() {
   bl.append(banner, banner_len);
 
   return try_send(bl);
+}
+
+ssize_t AsyncConnection::_send_auth_frame(char tag, char *payload,
+                                          uint32_t len) {
+  __le32 frame_len = sizeof(char) + len;
+  ldout(async_msgr->cct, 1) << __func__ << " frame_len=" << frame_len
+                            << " tag=" << (int)tag << " payload_len=" << len
+                            << dendl;
+
+  char data[sizeof(__le32)+frame_len];
+  memcpy(data, &frame_len, sizeof(__le32));
+  memcpy(data+sizeof(__le32), &tag, sizeof(char));
+  memcpy(data+sizeof(__le32)+sizeof(char), payload, len);
+
+  bufferlist bl;
+  bl.append(data, sizeof(__le32)+frame_len);
+  return try_send(bl);
+}
+
+ssize_t AsyncConnection::_send_set_auth_method(
+    std::vector<uint32_t> allowed_methods) {
+
+  // TODO: choose the prefered auth method from daemon/client config
+  int r;
+  __le32 method = CEPH_AUTH_NONE;
+  if (authorizer) {
+    method = authorizer->protocol;
+  }
+
+  if (!allowed_methods.empty()) {
+    bool found = false;
+    for (const auto& a_method : allowed_methods) {
+      if (a_method == method) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      lderr(async_msgr->cct) << __func__ << " client does not support any of"
+                            << " the allowed methods" << dendl;
+      return -EPROTONOSUPPORT;
+    }
+  }
+
+  ldout(async_msgr->cct, 1) << __func__ << " sending method=" << method
+                            << dendl;
+  r = _send_auth_frame(CEPH_MSGR_TAG_SET_AUTH_METHOD, (char *)&method,
+                       sizeof(__le32));
+  if (r < 0) {
+    lderr(async_msgr->cct) << __func__ << " failed to send set auth method: "
+                           << cpp_strerror(r) << dendl;
+  }
+  return r;
+}
+
+ssize_t AsyncConnection::_send_auth_payload() {
+  ldout(async_msgr->cct, 1) << __func__ << " sending auth block len="
+                            << authorizer->bl.length() << dendl;
+  char *auth_block = authorizer->bl.c_str();
+  __le32 len = authorizer->bl.length();
+  char payload[len+sizeof(__le32)];
+  memcpy(payload, &len, sizeof(__le32));
+  memcpy(payload+sizeof(__le32), auth_block, len);
+  return _send_auth_frame(CEPH_MSGR_TAG_AUTH_REQUEST, payload,
+                          len+sizeof(__le32));
+}
+
+ssize_t AsyncConnection::_handle_set_auth_method(uint32_t method) {
+  std::vector<uint32_t> allowed_methods;
+  async_msgr->ms_deliver_get_allowed_auth_methods(peer_type, allowed_methods);
+
+  bool found = false;
+  for (const auto& a_method : allowed_methods) {
+    if (a_method == method) {
+      found = true;
+    }
+  }
+
+  ssize_t r = 0;
+  if (!found) {
+    // send CEPH_MSGR_TAG_BAD_AUTH_METHOD
+    __le32 payload[2+allowed_methods.size()];
+    payload[0] = method;
+    payload[1] = allowed_methods.size();
+    int i=2;
+    for (const auto& a_method : allowed_methods) {
+      payload[i++] = a_method;
+    }
+    r = _send_auth_frame(CEPH_MSGR_TAG_BAD_AUTH_METHOD, (char *)&payload,
+                         sizeof(__le32)*(2+allowed_methods.size()));
+    if (r < 0) {
+      lderr(async_msgr->cct) << __func__ << " failed to send bad auth method:"
+                             << cpp_strerror(r) << dendl;
+    }
+  }
+  else {
+    accepted_auth_method = method;
+  }
+  return r;
+}
+
+ssize_t AsyncConnection::_handle_bad_auth_method(uint32_t method,
+    std::vector<uint32_t> allowed_methods) {
+  ldout(async_msgr->cct, 1) << __func__ << " method=" << method << dendl;
+  for (const auto& a_method : allowed_methods) {
+     ldout(async_msgr->cct, 1) << __func__ << " allowed auth method: "
+                               << a_method << dendl;
+  }
+  // TODO: call callback with the list of allowed auth methods and change
+  // the authorizer object accordingly!
+  return _send_set_auth_method(allowed_methods);
+}
+
+ssize_t AsyncConnection::_handle_auth_request(bufferlist& auth_block) {
+  bufferlist authorizer_reply;
+  bool authorizer_valid;
+  CryptoKey session_key;
+  if (!async_msgr->verify_authorizer(this, peer_type, accepted_auth_method,
+                                     auth_block, authorizer_reply,
+                                     authorizer_valid, session_key) || 
+      !authorizer_valid) {
+
+  }
+  return 0;
 }
 
 int AsyncConnection::handle_connect_reply(ceph_msg_connect &connect, ceph_msg_connect_reply &reply)
@@ -3455,6 +3449,7 @@ void AsyncConnection::reset_recv_state()
     delete authorizer;
     authorizer = NULL;
     got_bad_auth = false;
+    accepted_auth_method = false;
   }
 
   if (state > STATE_OPEN_MESSAGE_THROTTLE_MESSAGE &&

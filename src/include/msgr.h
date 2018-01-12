@@ -102,6 +102,13 @@ struct ceph_entity_inst {
 #define CEPH_MSGR_TAG_KEEPALIVE2     14
 #define CEPH_MSGR_TAG_KEEPALIVE2_ACK 15  /* keepalive reply */
 
+/* V2 protocol messages */
+#define CEPH_MSGR_TAG_SET_AUTH_METHOD 16
+#define CEPH_MSGR_TAG_BAD_AUTH_METHOD 17
+#define CEPH_MSGR_TAG_AUTH_REQUEST    18
+#define CEPH_MSGR_TAG_AUTH_REPLY      19
+
+
 
 /*
  * connection negotiation

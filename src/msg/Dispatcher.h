@@ -16,8 +16,12 @@
 #ifndef CEPH_DISPATCHER_H
 #define CEPH_DISPATCHER_H
 
+#include <vector>
+
+#include "include/assert.h"
 #include "include/buffer_fwd.h"
 #include "include/assert.h"
+#include "include/types.h"
 
 class Messenger;
 class Message;
@@ -204,6 +208,19 @@ public:
 				    ceph::bufferlist& authorizer_reply,
 				    bool& isvalid,
 				    CryptoKey& session_key) { return false; }
+  /**
+   * Returns the list of allowed authentication methods for a specific peer
+   * type.
+   *
+   * @param peer_type The type of the endpoint
+   * @param methods the array holding the list of available methods
+   */
+  virtual void ms_get_allowed_auth_methods(int peer_type,
+                                           std::vector<uint32_t>& methods) {
+    // default implementation allow all methods
+    methods.push_back(CEPH_AUTH_NONE);
+    methods.push_back(CEPH_AUTH_CEPHX);
+  }
   /**
    * @} //Authentication
    */
