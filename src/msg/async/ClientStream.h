@@ -14,6 +14,7 @@ class ClientStream : public Stream {
 
     void execute_waiting_auth_setup_state(TagMsg &msg);
 
+    void send_new_stream();
     void send_set_auth_method(__le32 *allowed_methods, uint32_t num_methods);
 
     void handle_auth_bad_method(__le32 method, __le32 num_methods,

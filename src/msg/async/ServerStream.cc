@@ -16,6 +16,9 @@ void ServerStream::process_message(TagMsg &msg) {
   // TODO: validate payload format for each Tag
 
   switch(state) {
+    case State::STATE_SERVER_NEW_STREAM:
+      execute_new_stream(msg);
+      break;
     case State::STATE_WAITING_AUTH_SETUP:
       execute_waiting_auth_setup_state(msg);
       break;
@@ -25,7 +28,21 @@ void ServerStream::process_message(TagMsg &msg) {
     default:
       break;
   }
+}
 
+void ServerStream::execute_new_stream(TagMsg &msg) {
+  ldout(msgr->cct, 1) << __func__ << " tag=" << (int)msg.tag << " payload_len="
+                      << msg.len << dendl;
+  switch(msg.tag) {
+    case Tag::TAG_NEW_STREAM:
+      handle_new_stream(*(__le32 *)msg.payload);
+      break;
+    default:
+      ldout(msgr->cct, 1) << __func__ << " dropping message tag="
+                          << (int)msg.tag << " payload_len=" << msg.len
+                          << dendl;
+      break;
+  }
 }
 
 void ServerStream::execute_waiting_auth_setup_state(TagMsg &msg) {
@@ -56,6 +73,14 @@ void ServerStream::execute_auth_setup_state(TagMsg &msg) {
                           << dendl;
       break;
   }
+}
+
+void ServerStream::handle_new_stream(__le32 peer_type) {
+  ldout(msgr->cct, 1) << __func__ << " peer_type=" << peer_type << dendl;
+
+  std::lock_guard<std::mutex> l(lock);
+  this->peer_type = peer_type;
+  state = State::STATE_WAITING_AUTH_SETUP;
 }
 
 void ServerStream::handle_auth_set_method(__le32 method) {

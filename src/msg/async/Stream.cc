@@ -12,7 +12,7 @@ ostream& Stream::_conn_prefix(std::ostream *_dout) {
 Stream::Stream(AsyncConnection *conn,  uint32_t stream_id) :
   Connection(conn->get_messenger()->cct, conn->get_messenger()),
   conn(conn), stream_id(stream_id),
-  state(State::STATE_WAITING_AUTH_SETUP) {
+  state(State::STATE_SERVER_NEW_STREAM) {
 }
 
 Stream::~Stream() {

@@ -2189,8 +2189,8 @@ ssize_t AsyncConnection::_process_connection_v2() {
       }
 
       // socket connection is established, streams take control from now
-      //_notify_streams_connection_ready();
-      state = STATE_CONNECTING_SEND_AUTH_SET;
+      _notify_streams_connection_ready();
+      //state = STATE_CONNECTING_SEND_AUTH_SET;
       break;
     }
     case STATE_CONNECTING_SEND_AUTH_SET:
@@ -2332,7 +2332,7 @@ ssize_t AsyncConnection::_process_connection_v2() {
       set_peer_addr(peer_addr);  // so that connection_state gets set up
       ldout(async_msgr->cct, 10) << __func__ << " accept peer addr is " << peer_addr << dendl;
 
-      state = STATE_OPEN_AUTH_FRAME_READ_HEADER;
+      state = STATE_OPEN_FRAME_READ_HEADER;
       break;
     }
     case STATE_ACCEPTING_WAIT_AUTH_SET:
@@ -2530,12 +2530,12 @@ ssize_t AsyncConnection::_handle_auth_request(bufferlist& auth_block) {
   bufferlist authorizer_reply;
   bool authorizer_valid;
   CryptoKey session_key;
-  if (!async_msgr->verify_authorizer(this, peer_type, accepted_auth_method,
+  /*if (!async_msgr->verify_authorizer(this, peer_type, accepted_auth_method,
                                      auth_block, authorizer_reply,
                                      authorizer_valid, session_key) || 
       !authorizer_valid) {
 
-  }
+  }*/
   return 0;
 }
 

@@ -16,11 +16,13 @@ class AsyncConnection;
 class Stream : public Connection {
   protected:
     enum class State : int {
+      STATE_SERVER_NEW_STREAM,
       STATE_WAITING_AUTH_SETUP,
       STATE_AUTH_SETUP
     };
 
     enum class Tag : char {
+      TAG_NEW_STREAM,
       TAG_AUTH_SET_METHOD,
       TAG_AUTH_BAD_METHOD,
       TAG_AUTH_REQUEST,

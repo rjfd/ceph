@@ -1,6 +1,8 @@
 #include "ClientStream.h"
 #include "AsyncConnection.h"
 
+#include "common/errno.h"
+
 #define dout_subsys ceph_subsys_ms
 #undef dout_prefix
 #define dout_prefix _conn_prefix(_dout)
@@ -11,6 +13,7 @@ ClientStream::ClientStream(AsyncConnection *conn, uint32_t stream_id) :
 
 void ClientStream::connection_ready() {
   ldout(msgr->cct, 1) << __func__ << dendl;
+  send_new_stream();
   send_set_auth_method(nullptr, 0);
 }
 
@@ -42,10 +45,22 @@ void ClientStream::execute_waiting_auth_setup_state(TagMsg &msg) {
   }
 }
 
+void ClientStream::send_new_stream() {
+  int r;
+
+  __le32 peer_type = msgr->get_myinst().name.type();
+  ldout(msgr->cct, 1) << __func__ << " sending new stream: peer_type="
+                      << peer_type << dendl;
+  r = send_message(Tag::TAG_NEW_STREAM, (char *)&peer_type, sizeof(__le32));
+  if (r < 0) {
+    lderr(msgr->cct) << __func__ << " failed to send new stream: r="
+                     << r << " " << cpp_strerror(r) << dendl;
+  }
+}
+
 void ClientStream::send_set_auth_method(__le32 *allowed_methods,
                                         uint32_t num_methods) {
 
-  // TODO: choose the prefered auth method from daemon/client config
   int r;
   __le32 method = CEPH_AUTH_CEPHX;//CEPH_AUTH_NONE;
 
