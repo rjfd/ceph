@@ -22,11 +22,14 @@ class Stream : public Connection {
     };
 
     enum class Tag : char {
+      // stream establishment
       TAG_NEW_STREAM,
+      // authentication
       TAG_AUTH_SET_METHOD,
       TAG_AUTH_BAD_METHOD,
       TAG_AUTH_REQUEST,
-      TAG_AUTH_REPLY
+      TAG_AUTH_REPLY,
+      TAG_AUTH_BAD_AUTH
     };
 
     struct TagMsg {

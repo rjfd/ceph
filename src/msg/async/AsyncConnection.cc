@@ -2190,7 +2190,7 @@ ssize_t AsyncConnection::_process_connection_v2() {
 
       // socket connection is established, streams take control from now
       _notify_streams_connection_ready();
-      //state = STATE_CONNECTING_SEND_AUTH_SET;
+      state = STATE_OPEN_FRAME_READ_HEADER;
       break;
     }
     case STATE_CONNECTING_SEND_AUTH_SET:

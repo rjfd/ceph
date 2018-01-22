@@ -67,7 +67,9 @@ int Stream::send_message(Tag tag, char *payload, uint32_t len) {
   memcpy(data, &stream_id, sizeof(__le32));
   memcpy(data+sizeof(__le32), &frame_len, sizeof(__le32));
   memcpy(data+sizeof(__le32)*2, &tag, sizeof(char));
-  memcpy(data+sizeof(__le32)*2+sizeof(char), payload, len);
+  if (payload) {
+    memcpy(data+sizeof(__le32)*2+sizeof(char), payload, len);
+  }
 
   bufferlist bl;
   bl.append(data, sizeof(__le32)*2+frame_len);
