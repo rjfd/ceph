@@ -1,4 +1,4 @@
-.coverage
+.coverage*
 htmlcov
 .tox
 coverage.xml
