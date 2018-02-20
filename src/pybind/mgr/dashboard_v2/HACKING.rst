@@ -162,7 +162,7 @@ instance if you only want to run the linting tools, do::
   $ PATH=../../../../build/bin:$PATH tox -e lint
 
 How to run a single unit test without using ``tox``?
-+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 When developing the code of a controller and respective test code, it's useful
 to be able to run that single test file without going through the whole ``tox``
