@@ -20,12 +20,12 @@ if 'COVERAGE_ENABLED' in os.environ:
     _cov.start()
 
 # pylint: disable=wrong-import-position
+from . import logger, mgr
 from .controllers.auth import Auth
 from .tools import load_controllers, json_error_page, SessionExpireAtBrowserCloseTool, \
                    NotificationQueue
 from .services import Service
 from .settings import Settings, options_command_list, handle_option_command
-from . import logger
 
 
 # cherrypy likes to sys.exit on error.  don't let it take us down too!
@@ -74,13 +74,10 @@ class Module(MgrModule):
 
     def __init__(self, *args, **kwargs):
         super(Module, self).__init__(*args, **kwargs)
-        logger.logger = self._logger
+        mgr.init(self)
         self._url_prefix = ''
 
     def configure_module(self):
-        Settings.mgr = self  # injects module instance into Settings class
-        Service.mgr = self  # injects module instance into Service class
-
         server_addr = self.get_localized_config('server_addr', '::')
         server_port = self.get_localized_config('server_port', '8080')
         if server_addr is None:
@@ -174,7 +171,7 @@ class Module(MgrModule):
         }
 
         def __init__(self, mgrmod):
-            self.ctrls = load_controllers(mgrmod)
+            self.ctrls = load_controllers()
             logger.debug('Loaded controllers: %s', self.ctrls)
 
             first_level_ctrls = [ctrl for ctrl in self.ctrls

@@ -5,6 +5,8 @@ import errno
 import inspect
 from six import add_metaclass
 
+from . import mgr
+
 
 class Options(object):
     """
@@ -33,12 +35,12 @@ class SettingsMeta(type):
     def __getattribute__(cls, attr):
         if not attr.startswith('_') and hasattr(Options, attr):
             default, stype = getattr(Options, attr)
-            return stype(SettingsMeta.mgr.get_config(attr, default))
+            return stype(mgr.get_config(attr, default))
         return SettingsMeta.__dict__.get(attr, None)
 
     def __setattr__(cls, attr, value):
         if not attr.startswith('_') and hasattr(Options, attr):
-            SettingsMeta.mgr.set_config(attr, str(value))
+            mgr.set_config(attr, str(value))
         else:
             setattr(SettingsMeta, attr, value)
 
