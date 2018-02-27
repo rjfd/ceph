@@ -24,7 +24,6 @@ from . import logger, mgr
 from .controllers.auth import Auth
 from .tools import load_controllers, json_error_page, SessionExpireAtBrowserCloseTool, \
                    NotificationQueue
-from .services import Service
 from .settings import Settings, options_command_list, handle_option_command
 
 
