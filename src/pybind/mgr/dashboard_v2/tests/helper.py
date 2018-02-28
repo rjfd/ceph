@@ -10,24 +10,9 @@ import unittest
 import requests
 
 
-def authenticate(func):
-    def decorate(self, *args, **kwargs):
-        self._ceph_cmd(['dashboard', 'set-login-credentials', 'admin', 'admin'])
-        self._post('/api/auth', {'username': 'admin', 'password': 'admin'})
-        self.assertStatus(201)
-        return func(self, *args, **kwargs)
-    return decorate
-
-
 class ControllerTestCase(unittest.TestCase):
-    DASHBOARD_HOST = os.environ.get('DASHBOARD_V2_HOST', "localhost")
-    DASHBOARD_PORT = os.environ.get('DASHBOARD_V2_PORT', 8080)
 
     def __init__(self, *args, **kwargs):
-        self.dashboard_host = kwargs.pop('dashboard_host') \
-            if 'dashboard_host' in kwargs else self.DASHBOARD_HOST
-        self.dashboard_port = kwargs.pop('dashboard_port') \
-            if 'dashboard_port' in kwargs else self.DASHBOARD_PORT
         super(ControllerTestCase, self).__init__(*args, **kwargs)
         self._session = requests.Session()
         self._resp = None
@@ -76,31 +61,3 @@ class ControllerTestCase(unittest.TestCase):
 
     def assertStatus(self, status):
         self.assertEqual(self._resp.status_code, status)
-
-    @classmethod
-    def _cmd(cls, cmd):
-        if sys.version_info > (3, 0):
-            res = subprocess.run(cmd, stdout=subprocess.PIPE).stdout
-        else:
-            res = subprocess.Popen(cmd, stdout=subprocess.PIPE).communicate()[0]
-        return res.decode('utf-8').strip()
-
-    @classmethod
-    def _ceph_cmd(cls, cmd):
-        _cmd = ['ceph']
-        _cmd.extend(cmd)
-        return cls._cmd(_cmd)
-
-    @classmethod
-    def set_config_key(cls, key, value):
-        cls._ceph_cmd(['config-key', 'set', key, value])
-
-    @classmethod
-    def get_config_key(cls, key):
-        return cls._ceph_cmd(['config-key', 'get', key])
-
-    @classmethod
-    def _rbd_cmd(cls, cmd):
-        _cmd = ['rbd']
-        _cmd.extend(cmd)
-        return cls._cmd(_cmd)
