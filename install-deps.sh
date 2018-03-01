@@ -246,7 +246,7 @@ else
 	$SUDO env DEBIAN_FRONTEND=noninteractive mk-build-deps --install --remove --tool="apt-get -y --no-install-recommends $backports" $control || exit 1
 	$SUDO env DEBIAN_FRONTEND=noninteractive apt-get -y remove ceph-build-deps
 	if [ -n "$backports" ] ; then rm $control; fi
-        $SUDO env DEBIAN_FRONTEND=noninteractive apt-get -y install python-coverage python-tox nodejs
+        $SUDO env DEBIAN_FRONTEND=noninteractive apt-get -y install nodejs
         [ ! -e /usr/bin/node ] && $SUDO env DEBIAN_FRONTEND=noninteractive apt-get -y install nodejs-legacy
         ensure_min_npm_version "env DEBIAN_FRONTEND=noninteractive apt-get -y install npm"
         ;;
@@ -270,7 +270,6 @@ else
                 if test $yumdnf = yum; then
                     $SUDO $yumdnf install -y yum-utils
                 fi
-                $SUDO $yumdnf install -y python-bcrypt
                 ;;
             CentOS|RedHatEnterpriseServer|VirtuozzoLinux)
                 $SUDO yum install -y yum-utils
@@ -302,7 +301,6 @@ else
                 elif test $(lsb_release -si) = VirtuozzoLinux -a $MAJOR_VERSION = 7 ; then
                     $SUDO yum-config-manager --enable cr
                 fi
-                $SUDO $yumdnf install -y py-bcrypt
                 ;;
         esac
         munge_ceph_spec_in $DIR/ceph.spec
@@ -311,7 +309,6 @@ else
             ensure_decent_gcc_on_rh $dts_ver
 	fi
         ! grep -q -i error: $DIR/yum-builddep.out || exit 1
-        $SUDO $yumdnf install -y python-coverage python-tox
         ensure_min_npm_version "$yumdnf install -y npm"
         ;;
     opensuse|suse|sles)
@@ -320,7 +317,6 @@ else
         $SUDO $zypp_install lsb-release systemd-rpm-macros
         munge_ceph_spec_in $DIR/ceph.spec
         $SUDO $zypp_install $(rpmspec -q --buildrequires $DIR/ceph.spec) || exit 1
-        $SUDO $zypp_install python-bcrypt python-coverage python-tox
         ensure_min_npm_version "zypper --non-interactive install npm"
         ;;
     alpine)
