@@ -23,7 +23,7 @@ if 'COVERAGE_ENABLED' in os.environ:
 from . import logger, mgr
 from .controllers.auth import Auth
 from .tools import load_controllers, json_error_page, SessionExpireAtBrowserCloseTool, \
-                   NotificationQueue
+                   NotificationQueue, TaskManager
 
 
 # cherrypy likes to sys.exit on error.  don't let it take us down too!
@@ -129,6 +129,7 @@ class Module(MgrModule):
 
         cherrypy.engine.start()
         NotificationQueue.start_queue()
+        TaskManager.init()
         logger.info('Waiting for engine...')
         cherrypy.engine.block()
         if 'COVERAGE_ENABLED' in os.environ:
