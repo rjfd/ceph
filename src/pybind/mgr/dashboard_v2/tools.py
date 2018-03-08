@@ -4,6 +4,7 @@ from __future__ import absolute_import
 
 import collections
 import datetime
+import fnmatch
 import importlib
 import inspect
 import json
@@ -486,3 +487,141 @@ class NotificationQueue(threading.Thread):
         self.notify_listeners(self._queue)
         self._queue.clear()
         logger.debug("notification queue finished")
+
+
+# pylint: disable=too-many-arguments
+class TaskManager(object):
+    ASYNC_TASK_TIMEOUT = 5.0
+    FINISHED_TASK_TTL = 60.0
+
+    VALUE_DONE = 0
+    VALUE_EXECUTING = 1
+    VALUE_EXCEPTION = 2
+
+    _executing_tasks = set()
+    _finished_tasks = set()
+    _lock = threading.Lock()
+
+    @classmethod
+    def init(cls):
+        NotificationQueue.register(cls._handle_finished_task, 'cd_task_finished')
+
+    @classmethod
+    def _handle_finished_task(cls, task):
+        logger.info("TM: finished %s", task)
+        with cls._lock:
+            cls._executing_tasks.remove(task)
+            cls._finished_tasks.add(task)
+
+    @classmethod
+    def run(cls, namespace, metadata, fn, *args, **kwargs):
+        task = AsyncTask(namespace, metadata, cls.ASYNC_TASK_TIMEOUT, fn, args, kwargs)
+        with cls._lock:
+            if task in cls._executing_tasks:
+                logger.debug("TM: task already executing: %s", task)
+                return cls.VALUE_EXECUTING, None
+            logger.debug("TM: created %s", task)
+            cls._executing_tasks.add(task)
+        logger.info("TM: running %s", task)
+        return task.run()
+
+    @classmethod
+    def _cleanup_old_tasks(cls, task_list):
+        now = datetime.datetime.now()
+        to_remove = [t for t in task_list
+                     if now - datetime.datetime.fromtimestamp(t.end_time) >
+                     datetime.timedelta(seconds=cls.FINISHED_TASK_TTL)]
+        for task in to_remove:
+            cls._finished_tasks.remove(task)
+
+    @classmethod
+    def list(cls, ns_glob=None):
+        executing_tasks = []
+        finished_tasks = []
+        with cls._lock:
+            for task in cls._executing_tasks:
+                if not ns_glob or fnmatch.fnmatch(task.namespace, ns_glob):
+                    executing_tasks.append(task)
+            for task in cls._finished_tasks:
+                if not ns_glob or fnmatch.fnmatch(task.namespace, ns_glob):
+                    finished_tasks.append(task)
+            cls._cleanup_old_tasks(finished_tasks)
+        return executing_tasks, finished_tasks
+
+
+class AsyncTask(object):
+    # pylint: disable=too-many-instance-attributes
+
+    class ExecutorThread(threading.Thread):
+        def __init__(self, task):
+            super(AsyncTask.ExecutorThread, self).__init__()
+            self._task = task
+            self.event = threading.Event()
+
+        # pylint: disable=broad-except
+        def run(self):
+            try:
+                self._task.begin_time = time.time()
+                val = self._task.fn(*self._task.fn_args, **self._task.fn_kwargs)
+                self._task.end_time = time.time()
+            except Exception as ex:
+                logger.exception("Error while calling %s: ex=%s", self._task, str(ex))
+                self._task.ret_value = None
+                self._task.executor_thread = None
+                self._task.exception = ex
+            else:
+                with self._task.lock:
+                    self._task.latency = self._task.end_time - self._task.begin_time
+                    self._task.ret_value = val
+                    self._task.executor_thread = None
+                    self._task.exception = None
+                logger.debug("execution of %s finished in: %s s", self._task, self._task.latency)
+            finally:
+                self.event.set()
+                NotificationQueue.new_notification('cd_task_finished', self._task)
+
+    def __init__(self, namespace, metadata, timeout, fn, args, kwargs):
+        self.namespace = namespace
+        self.metadata = metadata
+        self.timeout = timeout
+        self.fn = fn
+        self.fn_args = args
+        self.fn_kwargs = kwargs
+        self.executor_thread = None
+        self.event = threading.Event()
+        self.ret_value = None
+        self.begin_time = None
+        self.end_time = None
+        self.latency = 0
+        self.exception = None
+        self.lock = threading.Lock()
+
+    def __hash__(self):
+        return hash((self.namespace, tuple(sorted(self.metadata.items()))))
+
+    def __eq__(self, other):
+        return self.namespace == self.namespace and self.metadata == self.metadata
+
+    def __str__(self):
+        return "Task(ns={}, md={})" \
+               .format(self.namespace, self.metadata)
+
+    def run(self):
+        with self.lock:
+            if self.executor_thread is None:
+                self.executor_thread = AsyncTask.ExecutorThread(self)
+                self.executor_thread.start()
+
+            ev = self.executor_thread.event
+
+        success = ev.wait(timeout=self.timeout)
+
+        with self.lock:
+            if success:
+                # the action executed within the timeout
+                if self.exception:
+                    # execution raised an exception
+                    return TaskManager.VALUE_EXCEPTION, self.exception
+                return TaskManager.VALUE_DONE, self.ret_value
+            # the action is still executing
+            return TaskManager.VALUE_EXECUTING, None
