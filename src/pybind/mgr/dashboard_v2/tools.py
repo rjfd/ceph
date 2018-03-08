@@ -248,45 +248,46 @@ class RESTController(BaseController):
         ('GET', True): ('get', 200),
         ('PUT', True): ('set', 200),
         ('PATCH', True): ('set', 200),
-        ('DELETE', True): ('delete', 204),
+        ('DELETE', True): ('delete', 200),
     }
 
-    def _get_method(self, obj_key, detail_route_name):
-        if detail_route_name:
+    def _get_method(self, obj_key):
+        if obj_key:
             try:
-                method = getattr(self, detail_route_name)
-                if not getattr(method, 'detail_route'):
-                    self._not_implemented(obj_key, detail_route_name)
-                if cherrypy.request.method not in getattr(method, 'detail_route_methods'):
-                    self._not_implemented(obj_key, detail_route_name)
-                return method, 200
+                method = getattr(self, obj_key)
+                if getattr(method, 'detail_route'):
+                    if cherrypy.request.method not in getattr(method,
+                                                              'detail_route_methods'):
+                        self._not_implemented(obj_key, None)
+                    return method, 200, True
             except AttributeError:
-                self._not_implemented(obj_key, detail_route_name)
-        else:
-            method_name, status_code = self._method_mapping[
-                (cherrypy.request.method, obj_key is not None)]
-            method = getattr(self, method_name, None)
-            if not method:
-                self._not_implemented(obj_key, detail_route_name)
-            return method, status_code
+                pass
+
+        method_name, status_code = self._method_mapping[
+            (cherrypy.request.method, obj_key is not None)]
+        method = getattr(self, method_name, None)
+        if not method:
+            self._not_implemented(obj_key, None)
+        return method, status_code, False
 
     @cherrypy.expose
     def default(self, *vpath, **params):
         cherrypy.config.update({
             'error_page.default': json_error_page})
-        obj_key, detail_route_name = self.split_vpath(vpath)
-        method, status_code = self._get_method(obj_key, detail_route_name)
+        obj_key = vpath[0] if vpath else None
+        method, status_code, detailed_route = self._get_method(obj_key)
 
         if cherrypy.request.method not in ['GET', 'DELETE']:
             method = RESTController._takes_json(method)
 
-        if cherrypy.request.method != 'DELETE':
-            method = RESTController._returns_json(method)
+        method = RESTController._returns_json(method)
 
         cherrypy.response.status = status_code
 
-        obj_key_args = [obj_key] if obj_key else []
-        return method(*obj_key_args, **params)
+        if detailed_route:
+            return method(*vpath[1:], **params)
+
+        return method(*vpath, **params)
 
     @staticmethod
     def args_from_json(func):

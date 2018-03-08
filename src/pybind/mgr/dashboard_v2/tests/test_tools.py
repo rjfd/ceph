@@ -126,8 +126,8 @@ class RESTControllerTest(helper.CPWebCase):
         self.assertJsonBody({'code': 'hello', 'name': 'world'})
 
     def test_detail_route(self):
-        self._get('/foo/1/detail')
+        self._get('/foo/detail/1')
         self.assertJsonBody({'detail': '1'})
 
-        self._post('/foo/1/detail', 'post-data')
+        self._post('/foo/detail/1', 'post-data')
         self.assertStatus(405)
