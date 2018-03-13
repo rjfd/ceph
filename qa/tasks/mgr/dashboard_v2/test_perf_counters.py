@@ -35,3 +35,14 @@ class PerfCountersControllerTest(DashboardTestCase):
         self.assertIn('name', counter)
         self.assertIn('unit', counter)
         self.assertIn('value', counter)
+
+    @authenticate
+    def test_perf_counters_mgr_x_get(self):
+        data = self._get('/api/perf_counters/mgr/x')
+        self.assertStatus(200)
+
+        self.assertIsInstance(data, dict)
+        self.assertEqual('mgr', data['service']['type'])
+        self.assertEqual('x', data['service']['id'])
+        self.assertIsInstance(data['counters'], list)
+        self.assertEqual(len(data['counters']), 0)
