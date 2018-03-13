@@ -20,13 +20,14 @@ class PerfCountersControllerTest(DashboardTestCase):
             self.assertIn('osd.{}'.format(osd['osd']), data)
 
     @authenticate
-    def test_perf_counters_mon_a_get(self):
-        data = self._get('/api/perf_counters/mon/a')
+    def test_perf_counters_mon_get(self):
+        mon = self.mons()[0]
+        data = self._get('/api/perf_counters/mon/{}'.format(mon))
         self.assertStatus(200)
 
         self.assertIsInstance(data, dict)
         self.assertEqual('mon', data['service']['type'])
-        self.assertEqual('a', data['service']['id'])
+        self.assertEqual(mon, data['service']['id'])
         self.assertIsInstance(data['counters'], list)
         self.assertGreater(len(data['counters']), 0)
         counter = data['counters'][0]
@@ -37,12 +38,13 @@ class PerfCountersControllerTest(DashboardTestCase):
         self.assertIn('value', counter)
 
     @authenticate
-    def test_perf_counters_mgr_x_get(self):
-        data = self._get('/api/perf_counters/mgr/x')
+    def test_perf_counters_mgr_get(self):
+        mgr = self.mgr_cluster.mgr_ids[0]
+        data = self._get('/api/perf_counters/mgr/{}'.format(mgr))
         self.assertStatus(200)
 
         self.assertIsInstance(data, dict)
         self.assertEqual('mgr', data['service']['type'])
-        self.assertEqual('x', data['service']['id'])
+        self.assertEqual(mgr, data['service']['id'])
         self.assertIsInstance(data['counters'], list)
         self.assertEqual(len(data['counters']), 0)
