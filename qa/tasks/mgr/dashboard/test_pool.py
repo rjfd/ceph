@@ -5,6 +5,13 @@ from .helper import DashboardTestCase, authenticate
 
 
 class DashboardTest(DashboardTestCase):
+    @classmethod
+    def tearDownClass(cls):
+        super(DashboardTest, cls).tearDownClass()
+        cls._ceph_cmd(['osd', 'pool', 'delete', 'dashboard_pool', 'dashboard_pool',
+                       '--yes-i-really-really-mean-it'])
+
+
     @authenticate
     def test_pool_list(self):
         data = self._get("/api/pool")
@@ -60,3 +67,28 @@ class DashboardTest(DashboardTestCase):
         self.assertIn('flags', pool)
         self.assertIn('stats', pool)
         self.assertNotIn('flags_names', pool)
+
+    @authenticate
+    def test_pool_create(self):
+        data = {
+            'pool': 'dashboard_pool',
+            'pg_num': '10',
+            'pool_type': 'replicated',
+            'application_metadata': '{"rbd": {}}'
+        }
+        self._post('/api/pool/', data)
+        self.assertStatus(201)
+
+        pool = self._get("/api/pool/dashboard_pool")
+        self.assertStatus(200)
+        for k, v in data.items():
+            if k == 'pool_type':
+                self.assertEqual(pool['type'], 1)
+            elif k == 'pg_num':
+                self.assertEqual(pool[k], int(v), '{}: {} != {}'.format(k, pool[k], v))
+            elif k == 'application_metadata':
+                self.assertEqual(pool[k], {"rbd": {}})
+            elif k == 'pool':
+                self.assertEqual(pool['pool_name'], v)
+            else:
+                self.assertEqual(pool[k], v, '{}: {} != {}'.format(k, pool[k], v))

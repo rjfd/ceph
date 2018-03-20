@@ -344,6 +344,13 @@ class RESTController(BaseController):
         func._args_from_json_ = True
         return func
 
+    # pylint: disable=deprecated-method
+    @staticmethod
+    def _function_args(func):
+        if sys.version_info > (3, 0):
+            return list(inspect.signature(func).parameters.keys())
+        return inspect.getargspec(func).args[1:]
+
     # pylint: disable=W1505
     @staticmethod
     def _takes_json(func):
@@ -359,19 +366,8 @@ class RESTController(BaseController):
                 raise cherrypy.HTTPError(400, 'Failed to decode JSON: {}'
                                          .format(str(e)))
             if hasattr(func, '_args_from_json_'):
-                if sys.version_info > (3, 0):
-                    f_args = list(inspect.signature(func).parameters.keys())
-                else:
-                    f_args = inspect.getargspec(func).args[1:]
-                n_args = []
-                for arg in args:
-                    n_args.append(arg)
-                for arg in f_args:
-                    if arg in data:
-                        n_args.append(data[arg])
-                        data.pop(arg)
-                kwargs.update(data)
-                return func(*n_args, **kwargs)
+                kwargs.update(data.items())
+                return func(*args, **kwargs)
 
             return func(data, *args, **kwargs)
         return inner
