@@ -768,6 +768,7 @@ class Task(object):
         if not in_lock:
             self.lock.acquire()
         prog = self.progress + delta
+        logger.debug("TK: progress %s%% for task: %s", self.progress, self)
         self.progress = prog if prog <= 100 else 100
         if not in_lock:
             self.lock.release()
@@ -779,5 +780,6 @@ class Task(object):
         if not in_lock:
             self.lock.acquire()
         self.progress = percentage
+        logger.debug("TK: progress %s%% for task: %s", self.progress, self)
         if not in_lock:
             self.lock.release()
