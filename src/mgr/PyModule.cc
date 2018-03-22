@@ -40,10 +40,18 @@ std::string handle_pyerror()
     object traceback(import("traceback"));
     if (!tb) {
         object format_exception_only(traceback.attr("format_exception_only"));
+      try {
         formatted_list = format_exception_only(hexc, hval);
+        } catch (error_already_set const &) {
+          return "exception raised in traceback.format_exception_only";
+        }
     } else {
         object format_exception(traceback.attr("format_exception"));
-        formatted_list = format_exception(hexc,hval, htb);
+        try {
+          formatted_list = format_exception(hexc,hval, htb);
+        } catch (error_already_set const &) {
+          return "exception raised in traceback.format_exception_only";
+        }
     }
     formatted = str("").join(formatted_list);
     return extract<std::string>(formatted);
