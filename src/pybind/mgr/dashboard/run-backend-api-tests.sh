@@ -91,6 +91,7 @@ EOF
 
     MGR=2 RGW=1 ../src/vstart.sh -n -d
     sleep 10
+    ./bin/ceph config set mon osd_pool_default_erasure_code_profile "plugin=jerasure technique=reed_sol_van k=2 m=1 crush-failure-domain=osd"
     cd $CURR_DIR
 }
 
