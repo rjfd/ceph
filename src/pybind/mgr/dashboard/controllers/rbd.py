@@ -76,6 +76,7 @@ class Rbd(RESTController):
             features = i.features()
             stat['features'] = features
             stat['features_name'] = self._format_bitmask(features)
+            stat['parent_name'] = stat['parent_name'].decode('utf8')
 
             try:
                 parent_info = i.parent_info()
