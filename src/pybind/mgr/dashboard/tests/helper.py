@@ -10,8 +10,8 @@ import cherrypy
 from cherrypy.test import helper
 
 from .. import logger
-from ..controllers.auth import Auth
 from ..controllers import json_error_page, generate_controller_routes
+from ..services.auth import AuthManagerTool
 from ..tools import SessionExpireAtBrowserCloseTool
 
 
@@ -29,7 +29,7 @@ class ControllerTestCase(helper.CPWebCase):
             base_url: {'request.dispatch': mapper}})
 
     def __init__(self, *args, **kwargs):
-        cherrypy.tools.authenticate = cherrypy.Tool('before_handler', Auth.check_auth)
+        cherrypy.tools.authenticate = AuthManagerTool()
         cherrypy.tools.session_expire_at_browser_close = SessionExpireAtBrowserCloseTool()
         cherrypy.config.update({'error_page.default': json_error_page})
         super(ControllerTestCase, self).__init__(*args, **kwargs)

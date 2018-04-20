@@ -30,6 +30,9 @@ from .controllers import generate_routes, json_error_page
 from .controllers.auth import Auth
 from .tools import SessionExpireAtBrowserCloseTool, NotificationQueue, \
                    RequestLoggingTool, TaskManager
+from .services.auth import AuthManager, AuthManagerTool
+from .services.access_control import ACCESS_CONTROL_COMMANDS, \
+                                     handle_access_control_command
 from .settings import options_command_list, options_schema_list, \
                       handle_option_command
 
@@ -73,6 +76,7 @@ class Module(MgrModule):
         }
     ]
     COMMANDS.extend(options_command_list())
+    COMMANDS.extend(ACCESS_CONTROL_COMMANDS)
 
     OPTIONS = [
         {'name': 'server_addr'},
@@ -159,6 +163,8 @@ class Module(MgrModule):
         cherrypy.tree.mount(None, config=config)
 
     def serve(self):
+        AuthManager.initialize()
+
         if 'COVERAGE_ENABLED' in os.environ:
             _cov.start()
         self.configure_cherrypy()
@@ -182,6 +188,9 @@ class Module(MgrModule):
 
     def handle_command(self, cmd):
         res = handle_option_command(cmd)
+        if res[0] != -errno.ENOSYS:
+            return res
+        res = handle_access_control_command(cmd)
         if res[0] != -errno.ENOSYS:
             return res
         if cmd['prefix'] == 'dashboard set-login-credentials':
