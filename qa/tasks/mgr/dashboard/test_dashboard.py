@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 from __future__ import absolute_import
 
-from .helper import DashboardTestCase, authenticate
+from .helper import DashboardTestCase
 
 
 class DashboardTest(DashboardTestCase):
     CEPHFS = True
 
-    @authenticate
     def test_health(self):
         data = self._get("/api/dashboard/health")
         self.assertStatus(200)

@@ -1,12 +1,11 @@
 from __future__ import absolute_import
 
-from .helper import DashboardTestCase, authenticate
+from .helper import DashboardTestCase
 
 
 class SummaryTest(DashboardTestCase):
     CEPHFS = True
 
-    @authenticate
     def test_summary(self):
         data = self._get("/api/summary")
         self.assertStatus(200)

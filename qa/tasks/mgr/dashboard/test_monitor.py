@@ -1,11 +1,18 @@
 # -*- coding: utf-8 -*-
 from __future__ import absolute_import
 
-from .helper import DashboardTestCase, authenticate
+from .helper import DashboardTestCase
 
 
 class MonitorTest(DashboardTestCase):
-    @authenticate
+    AUTH_ROLES = ['Cluster Manager']
+
+    @DashboardTestCase.RunAs('test', 'test', ['Block Manager'])
+    def test_access_permissions(self):
+        self._get('/api/monitor')
+        self.assertStatus(403)
+
+
     def test_monitor_default(self):
         data = self._get("/api/monitor")
         self.assertStatus(200)

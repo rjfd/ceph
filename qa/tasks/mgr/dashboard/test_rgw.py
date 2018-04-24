@@ -4,11 +4,19 @@ import urllib
 import logging
 logger = logging.getLogger(__name__)
 
-from .helper import DashboardTestCase, authenticate
+from .helper import DashboardTestCase
 
 
 class RgwControllerTest(DashboardTestCase):
-    @authenticate
+    AUTH_ROLES = ['RGW Manager']
+
+    @DashboardTestCase.RunAs('test', 'test', [{'rgw': ['create', 'update', 'delete']}])
+    def test_read_access_permissions(self):
+        self._get('/api/rgw/daemon')
+        self.assertStatus(403)
+        self._get('/api/rgw/daemon/id')
+        self.assertStatus(403)
+
     def test_rgw_daemon_list(self):
         data = self._get('/api/rgw/daemon')
         self.assertStatus(200)
@@ -19,7 +27,6 @@ class RgwControllerTest(DashboardTestCase):
         self.assertIn('version', data)
         self.assertIn('server_hostname', data)
 
-    @authenticate
     def test_rgw_daemon_get(self):
         data = self._get('/api/rgw/daemon')
         self.assertStatus(200)
@@ -32,6 +39,7 @@ class RgwControllerTest(DashboardTestCase):
         self.assertTrue(data['rgw_metadata'])
 
 class RgwProxyExceptionsTest(DashboardTestCase):
+    AUTH_ROLES = ['RGW Manager']
 
     @classmethod
     def setUpClass(cls):
@@ -40,7 +48,6 @@ class RgwProxyExceptionsTest(DashboardTestCase):
         cls._ceph_cmd(['dashboard', 'set-rgw-api-secret-key', ''])
         cls._ceph_cmd(['dashboard', 'set-rgw-api-access-key', ''])
 
-    @authenticate
     def test_no_credentials_exception(self):
         resp = self._get('/api/rgw/proxy/status')
         self.assertStatus(500)
@@ -48,6 +55,8 @@ class RgwProxyExceptionsTest(DashboardTestCase):
 
 
 class RgwProxyTest(DashboardTestCase):
+    AUTH_ROLES = ['RGW Manager']
+
     @classmethod
     def setUpClass(cls):
         super(RgwProxyTest, cls).setUpClass()
@@ -123,7 +132,6 @@ class RgwProxyTest(DashboardTestCase):
         self.assertIn('"HostId"', resp['detail'])
         self.assertIn('"RequestId"', resp['detail'])
 
-    @authenticate
     def test_rgw_proxy(self):
         """Test basic request types"""
         self.maxDiff = None

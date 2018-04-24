@@ -2,15 +2,23 @@
 
 from __future__ import absolute_import
 
-from .helper import DashboardTestCase, authenticate, JObj, JAny, JList, JLeaf, JTuple
+from .helper import DashboardTestCase, JObj, JAny, JList, JLeaf, JTuple
 
 
 class OsdTest(DashboardTestCase):
 
+    AUTH_ROLES = ['Cluster Manager']
+
+    @DashboardTestCase.RunAs('test', 'test', ['Block Manager'])
+    def test_access_permissions(self):
+        self._get('/api/osd')
+        self.assertStatus(403)
+        self._get('/api/osd/0')
+        self.assertStatus(403)
+
     def assert_in_and_not_none(self, data, properties):
         self.assertSchema(data, JObj({p: JAny(none=False) for p in properties}, allow_unknown=True))
 
-    @authenticate
     def test_list(self):
         data = self._get('/api/osd')
         self.assertStatus(200)
@@ -26,7 +34,6 @@ class OsdTest(DashboardTestCase):
         self.assertSchema(data['stats_history']['op_out_bytes'],
                           JList(JTuple([JLeaf(int), JLeaf(float)])))
 
-    @authenticate
     def test_details(self):
         data = self._get('/api/osd/0')
         self.assertStatus(200)
