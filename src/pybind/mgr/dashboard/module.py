@@ -27,7 +27,6 @@ if 'COVERAGE_ENABLED' in os.environ:
 # pylint: disable=wrong-import-position
 from . import logger, mgr
 from .controllers import generate_routes, json_error_page
-from .controllers.auth import Auth
 from .tools import SessionExpireAtBrowserCloseTool, NotificationQueue, \
                    RequestLoggingTool, TaskManager
 from .services.auth import AuthManager, AuthManagerTool
@@ -61,13 +60,6 @@ class Module(MgrModule):
     """
 
     COMMANDS = [
-        {
-            'cmd': 'dashboard set-login-credentials '
-                   'name=username,type=CephString '
-                   'name=password,type=CephString',
-            'desc': 'Set the login credentials',
-            'perm': 'w'
-        },
         {
             'cmd': 'dashboard set-session-expire '
                    'name=seconds,type=CephInt',
@@ -128,7 +120,7 @@ class Module(MgrModule):
                                                               default=''))
 
         # Initialize custom handlers.
-        cherrypy.tools.authenticate = cherrypy.Tool('before_handler', Auth.check_auth)
+        cherrypy.tools.authenticate = AuthManagerTool()
         cherrypy.tools.session_expire_at_browser_close = SessionExpireAtBrowserCloseTool()
         cherrypy.tools.request_logging = RequestLoggingTool()
 
@@ -193,9 +185,6 @@ class Module(MgrModule):
         res = handle_access_control_command(cmd)
         if res[0] != -errno.ENOSYS:
             return res
-        if cmd['prefix'] == 'dashboard set-login-credentials':
-            Auth.set_login_credentials(cmd['username'], cmd['password'])
-            return 0, 'Username and password updated', ''
         elif cmd['prefix'] == 'dashboard set-session-expire':
             self.set_config('session-expire', str(cmd['seconds']))
             return 0, 'Session expiration timeout updated', ''

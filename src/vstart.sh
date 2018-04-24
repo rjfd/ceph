@@ -710,7 +710,8 @@ EOF
 
     # setting login credentials for dashboard
     if $with_mgr_dashboard; then
-        ceph_adm tell mgr dashboard set-login-credentials admin admin
+        ceph_adm tell mgr dashboard ac-user-create admin admin
+        ceph_adm tell mgr dashboard ac-user-set-roles admin Administrator
     fi
 
     if ceph_adm tell mgr restful create-self-signed-cert; then
