@@ -9,7 +9,7 @@ from ..controllers.task import Task as TaskController
 from ..tools import NotificationQueue, TaskManager
 
 
-@ApiController('test/task')
+@ApiController('test/task', secure=False)
 class TaskTest(RESTController):
     sleep_time = 0.0
 

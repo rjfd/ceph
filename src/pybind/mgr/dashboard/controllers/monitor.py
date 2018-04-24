@@ -5,12 +5,11 @@ import json
 
 import cherrypy
 
-from . import ApiController, AuthRequired, BaseController
+from . import ApiController, BaseController
 from .. import mgr
 
 
 @ApiController('monitor')
-@AuthRequired()
 class Monitor(BaseController):
     @cherrypy.expose
     @cherrypy.tools.json_out()

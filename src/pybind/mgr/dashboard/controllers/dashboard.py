@@ -6,7 +6,7 @@ import json
 
 import cherrypy
 
-from . import ApiController, AuthRequired, BaseController
+from . import ApiController, BaseController
 from .. import mgr
 from ..services.ceph_service import CephService
 from ..tools import NotificationQueue
@@ -16,7 +16,6 @@ LOG_BUFFER_SIZE = 30
 
 
 @ApiController('dashboard')
-@AuthRequired()
 class Dashboard(BaseController):
     def __init__(self):
         super(Dashboard, self).__init__()

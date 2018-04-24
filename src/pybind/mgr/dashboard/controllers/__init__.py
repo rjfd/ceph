@@ -24,32 +24,19 @@ from ..settings import Settings
 from ..tools import Session, TaskManager
 
 
-def ApiController(path):
+def ApiController(path, secure=True):
     def decorate(cls):
         cls._cp_controller_ = True
         cls._cp_path_ = path
         config = {
             'tools.sessions.on': True,
             'tools.sessions.name': Session.NAME,
-            'tools.session_expire_at_browser_close.on': True
+            'tools.session_expire_at_browser_close.on': True,
+            'tools.authenticate.on': secure
         }
         if not hasattr(cls, '_cp_config'):
             cls._cp_config = {}
-        if 'tools.authenticate.on' not in cls._cp_config:
-            config['tools.authenticate.on'] = False
         cls._cp_config.update(config)
-        return cls
-    return decorate
-
-
-def AuthRequired(enabled=True):
-    def decorate(cls):
-        if not hasattr(cls, '_cp_config'):
-            cls._cp_config = {
-                'tools.authenticate.on': enabled
-            }
-        else:
-            cls._cp_config['tools.authenticate.on'] = enabled
         return cls
     return decorate
 

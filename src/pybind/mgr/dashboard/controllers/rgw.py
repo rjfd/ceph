@@ -4,20 +4,18 @@ from __future__ import absolute_import
 import json
 import cherrypy
 
-from . import ApiController, BaseController, RESTController, AuthRequired
+from . import ApiController, BaseController, RESTController
 from .. import logger
 from ..services.ceph_service import CephService
 from ..services.rgw_client import RgwClient
 
 
 @ApiController('rgw')
-@AuthRequired()
 class Rgw(RESTController):
     pass
 
 
 @ApiController('rgw/daemon')
-@AuthRequired()
 class RgwDaemon(RESTController):
 
     def list(self):
@@ -64,7 +62,6 @@ class RgwDaemon(RESTController):
 
 
 @ApiController('rgw/proxy/{path:.*}')
-@AuthRequired()
 class RgwProxy(BaseController):
     @cherrypy.expose
     def __call__(self, path, **params):

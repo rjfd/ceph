@@ -5,14 +5,13 @@ from collections import defaultdict
 
 import cherrypy
 
-from . import ApiController, AuthRequired, BaseController
+from . import ApiController, BaseController
 from .. import mgr
 from ..services.ceph_service import CephService
 from ..tools import ViewCache
 
 
 @ApiController('cephfs')
-@AuthRequired()
 class CephFS(BaseController):
     def __init__(self):
         super(CephFS, self).__init__()

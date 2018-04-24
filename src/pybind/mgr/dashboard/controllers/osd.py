@@ -5,13 +5,12 @@ import json
 
 from mgr_module import CommandResult
 
-from . import ApiController, AuthRequired, RESTController
+from . import ApiController, RESTController
 from .. import logger, mgr
 from ..services.ceph_service import CephService
 
 
 @ApiController('osd')
-@AuthRequired()
 class Osd(RESTController):
     def list(self):
         osds = self.get_osd_map()

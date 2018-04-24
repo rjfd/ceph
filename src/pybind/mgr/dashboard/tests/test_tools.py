@@ -12,7 +12,7 @@ from ..tools import is_valid_ipv6_address, dict_contains_path
 
 
 # pylint: disable=W0613
-@ApiController('foo')
+@ApiController('foo', secure=False)
 class FooResource(RESTController):
     elems = []
 
@@ -37,13 +37,13 @@ class FooResource(RESTController):
         return dict(key=key, newdata=newdata)
 
 
-@ApiController('foo/:key/:method')
+@ApiController('foo/:key/:method', secure=False)
 class FooResourceDetail(RESTController):
     def list(self, key, method):
         return {'detail': (key, [method])}
 
 
-@ApiController('fooargs')
+@ApiController('fooargs', secure=False)
 class FooArgs(RESTController):
     def set(self, code, name=None, opt1=None, opt2=None):
         return {'code': code, 'name': name, 'opt1': opt1, 'opt2': opt2}

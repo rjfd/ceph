@@ -5,7 +5,7 @@ import json
 
 import cherrypy
 
-from . import AuthRequired, ApiController, BaseController
+from . import ApiController, BaseController
 from .. import logger, mgr
 from ..controllers.rbd_mirroring import get_daemons_and_pools
 from ..services.ceph_service import CephService
@@ -13,7 +13,6 @@ from ..tools import TaskManager
 
 
 @ApiController('summary')
-@AuthRequired()
 class Summary(BaseController):
     def _rbd_pool_data(self):
         pool_names = [pool['pool_name'] for pool in CephService.get_pool_list('rbd')]
