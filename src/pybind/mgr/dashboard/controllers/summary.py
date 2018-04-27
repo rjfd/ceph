@@ -5,14 +5,15 @@ import json
 
 import cherrypy
 
-from . import ApiController, BaseController
+from . import ApiController, BaseController, ReadPermission
 from .. import logger, mgr
 from ..controllers.rbd_mirroring import get_daemons_and_pools
+from ..security import Module
 from ..services.ceph_service import CephService
 from ..tools import TaskManager
 
 
-@ApiController('summary')
+@ApiController('summary', Module.GLOBAL)
 class Summary(BaseController):
     def _rbd_pool_data(self):
         pool_names = [pool['pool_name'] for pool in CephService.get_pool_list('rbd')]
@@ -58,6 +59,7 @@ class Summary(BaseController):
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
+    @ReadPermission
     def __call__(self):
         executing_t, finished_t = TaskManager.list_serializable()
         return {

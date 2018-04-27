@@ -20,14 +20,22 @@ import cherrypy
 from six import add_metaclass
 
 from .. import logger
+from ..exceptions import ModuleNotValid, PermissionNotValid
+from ..security import Module, Permission
 from ..settings import Settings
 from ..tools import Session, TaskManager
 
 
-def ApiController(path, secure=True):
+def ApiController(path, security_module=None, secure=True):
+    if security_module and not Module.valid_module(security_module):
+        logger.debug("Invalid security module name: %s\n Possible values: %s",
+                     security_module, Module.all_modules())
+        raise ModuleNotValid(security_module)
+
     def decorate(cls):
         cls._cp_controller_ = True
         cls._cp_path_ = path
+        cls._security_module = security_module
         config = {
             'tools.sessions.on': True,
             'tools.sessions.name': Session.NAME,
@@ -108,7 +116,7 @@ def generate_routes(url_prefix):
 
     mapper.connect(ApiRoot.__name__, "{}/api".format(url_prefix),
                    controller=ApiRoot("{}/api".format(url_prefix),
-                                      ctrls))
+                                      ctrls), action="__call__")
     return mapper
 
 
@@ -243,6 +251,8 @@ def browsable_api_view(meth):
     wrapper.exposed = True
     if hasattr(meth, '_cp_config'):
         wrapper._cp_config = meth._cp_config
+    if hasattr(meth, '_security_permissions'):
+        wrapper._security_permissions = meth._security_permissions
     return wrapper
 
 
@@ -427,6 +437,17 @@ class RESTController(BaseController):
     ])
 
     @classmethod
+    def set_permissions(cls, func, methods):
+        if 'GET' in methods:
+            _set_func_permissions(func, [Permission.READ])
+        if 'POST' in methods:
+            _set_func_permissions(func, [Permission.CREATE])
+        if 'DELETE' in methods:
+            _set_func_permissions(func, [Permission.DELETE])
+        if 'PUT' in methods or 'PATCH' in methods:
+            _set_func_permissions(func, [Permission.UPDATE])
+
+    @classmethod
     def endpoints(cls):
         # pylint: disable=too-many-branches
 
@@ -444,6 +465,7 @@ class RESTController(BaseController):
             if not k[1] and func:
                 if k[0] != 'PATCH':  # we already wrapped in PUT
                     wrapper = cls._rest_request_wrapper(func, v[1])
+                    cls.set_permissions(wrapper, [k[0]])
                     setattr(cls, v[0], wrapper)
                 else:
                     wrapper = func
@@ -455,6 +477,7 @@ class RESTController(BaseController):
             if k[1] and func:
                 if k[0] != 'PATCH':  # we already wrapped in PUT
                     wrapper = cls._rest_request_wrapper(func, v[1])
+                    cls.set_permissions(wrapper, [k[0]])
                     setattr(cls, v[0], wrapper)
                 else:
                     wrapper = func
@@ -468,6 +491,7 @@ class RESTController(BaseController):
         for attr, val in inspect.getmembers(cls, predicate=isfunction):
             if hasattr(val, '_collection_method_'):
                 wrapper = cls._rest_request_wrapper(val, 200)
+                cls.set_permissions(wrapper, val._collection_method_)
                 setattr(cls, attr, wrapper)
                 result.append(
                     (val._collection_method_, attr, attr, []))
@@ -475,6 +499,7 @@ class RESTController(BaseController):
         for attr, val in inspect.getmembers(cls, predicate=isfunction):
             if hasattr(val, '_resource_method_'):
                 wrapper = cls._rest_request_wrapper(val, 200)
+                cls.set_permissions(wrapper, val._resource_method_)
                 setattr(cls, attr, wrapper)
                 res_params = [":{}".format(arg) for arg in args]
                 url_suffix = "{}/{}".format("/".join(res_params), attr)
@@ -554,3 +579,43 @@ class RESTController(BaseController):
             func._collection_method_ = methods
             return func
         return _wrapper
+
+
+# Role-based access permissions decorators
+
+def _set_func_permissions(func, permissions):
+    if not isinstance(permissions, list):
+        permissions = [permissions]
+
+    for perm in permissions:
+        if not Permission.valid_permission(perm):
+            logger.debug("Invalid security permission: %s\n "
+                         "Possible values: %s", perm,
+                         Permission.all_permissions())
+            raise PermissionNotValid(perm)
+
+    if not hasattr(func, '_security_permissions'):
+        func._security_permissions = permissions
+    else:
+        permissions.extend(func._security_permissions)
+        func._security_permissions = list(set(permissions))
+
+
+def ReadPermission(func):
+    _set_func_permissions(func, Permission.READ)
+    return func
+
+
+def CreatePermission(func):
+    _set_func_permissions(func, Permission.CREATE)
+    return func
+
+
+def DeletePermission(func):
+    _set_func_permissions(func, Permission.DELETE)
+    return func
+
+
+def UpdatePermission(func):
+    _set_func_permissions(func, Permission.UPDATE)
+    return func

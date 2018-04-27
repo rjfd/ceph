@@ -5,13 +5,14 @@ from collections import defaultdict
 
 import cherrypy
 
-from . import ApiController, BaseController
+from . import ApiController, BaseController, ReadPermission
 from .. import mgr
+from ..security import Module
 from ..services.ceph_service import CephService
 from ..tools import ViewCache
 
 
-@ApiController('cephfs')
+@ApiController('cephfs', Module.CEPHFS)
 class CephFS(BaseController):
     def __init__(self):
         super(CephFS, self).__init__()
@@ -22,6 +23,7 @@ class CephFS(BaseController):
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
+    @ReadPermission
     def clients(self, fs_id):
         fs_id = self.fs_id_to_int(fs_id)
 
@@ -29,6 +31,7 @@ class CephFS(BaseController):
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
+    @ReadPermission
     def data(self, fs_id):
         fs_id = self.fs_id_to_int(fs_id)
 
@@ -36,6 +39,7 @@ class CephFS(BaseController):
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
+    @ReadPermission
     def mds_counters(self, fs_id):
         """
         Result format: map of daemon name to map of counter to list of datapoints

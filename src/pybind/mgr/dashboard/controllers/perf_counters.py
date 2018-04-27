@@ -3,6 +3,7 @@ from __future__ import absolute_import
 
 from . import ApiController, RESTController
 from .. import mgr
+from ..security import Module
 from ..services.ceph_service import CephService
 
 
@@ -38,37 +39,37 @@ class PerfCounter(RESTController):
         }
 
 
-@ApiController('perf_counters/mds')
+@ApiController('perf_counters/mds', Module.CEPHFS)
 class MdsPerfCounter(PerfCounter):
     service_type = 'mds'
 
 
-@ApiController('perf_counters/mon')
+@ApiController('perf_counters/mon', Module.MONITOR)
 class MonPerfCounter(PerfCounter):
     service_type = 'mon'
 
 
-@ApiController('perf_counters/osd')
+@ApiController('perf_counters/osd', Module.OSD)
 class OsdPerfCounter(PerfCounter):
     service_type = 'osd'
 
 
-@ApiController('perf_counters/rgw')
+@ApiController('perf_counters/rgw', Module.RGW)
 class RgwPerfCounter(PerfCounter):
     service_type = 'rgw'
 
 
-@ApiController('perf_counters/rbd-mirror')
+@ApiController('perf_counters/rbd-mirror', Module.RBD_MIRRORING)
 class RbdMirrorPerfCounter(PerfCounter):
     service_type = 'rbd-mirror'
 
 
-@ApiController('perf_counters/mgr')
+@ApiController('perf_counters/mgr', Module.MANAGER)
 class MgrPerfCounter(PerfCounter):
     service_type = 'mgr'
 
 
-@ApiController('perf_counters')
+@ApiController('perf_counters', Module.GLOBAL)
 class PerfCounters(RESTController):
     def list(self):
         return mgr.get_all_perf_counters()

@@ -3,12 +3,13 @@ from __future__ import absolute_import
 
 import cherrypy
 
-from . import ApiController, RESTController
+from . import ApiController, RESTController, ReadPermission
 from .. import mgr
+from ..security import Module
 from ..services.ceph_service import CephService
 
 
-@ApiController('pool')
+@ApiController('pool', Module.POOL)
 class Pool(RESTController):
 
     @classmethod
@@ -83,6 +84,7 @@ class Pool(RESTController):
 
     @cherrypy.tools.json_out()
     @cherrypy.expose
+    @ReadPermission
     def _info(self):
         """Used by the create-pool dialog"""
         def rules(pool_type):

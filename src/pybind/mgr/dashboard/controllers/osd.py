@@ -7,10 +7,11 @@ from mgr_module import CommandResult
 
 from . import ApiController, RESTController
 from .. import logger, mgr
+from ..security import Module
 from ..services.ceph_service import CephService
 
 
-@ApiController('osd')
+@ApiController('osd', Module.OSD)
 class Osd(RESTController):
     def list(self):
         osds = self.get_osd_map()

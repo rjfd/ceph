@@ -2,10 +2,11 @@
 from __future__ import absolute_import
 
 from . import ApiController, RESTController
+from ..security import Module
 from ..tools import TaskManager
 
 
-@ApiController('task')
+@ApiController('task', Module.GLOBAL)
 class Task(RESTController):
     def list(self, name=None):
         executing_t, finished_t = TaskManager.list_serializable(name)

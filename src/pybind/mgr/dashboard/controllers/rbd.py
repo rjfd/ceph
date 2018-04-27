@@ -10,6 +10,7 @@ import rbd
 
 from . import ApiController, RESTController, Task
 from .. import mgr
+from ..security import Module
 from ..services.ceph_service import CephService
 from ..tools import ViewCache
 
@@ -110,7 +111,7 @@ def _sort_features(features, enable=True):
     features.sort(key=key_func, reverse=not enable)
 
 
-@ApiController('block/image')
+@ApiController('block/image', Module.RBD_IMAGE)
 class Rbd(RESTController):
 
     RESOURCE_ID = "pool_name/image_name"
@@ -366,7 +367,7 @@ class Rbd(RESTController):
         return _format_bitmask(int(rbd_default_features))
 
 
-@ApiController('block/image/:pool_name/:image_name/snap')
+@ApiController('block/image/:pool_name/:image_name/snap', Module.RBD_IMAGE)
 class RbdSnapshot(RESTController):
 
     RESOURCE_ID = "snapshot_name"

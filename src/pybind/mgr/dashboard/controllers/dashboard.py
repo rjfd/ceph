@@ -6,8 +6,9 @@ import json
 
 import cherrypy
 
-from . import ApiController, BaseController
+from . import ApiController, BaseController, ReadPermission
 from .. import mgr
+from ..security import Module
 from ..services.ceph_service import CephService
 from ..tools import NotificationQueue
 
@@ -15,7 +16,7 @@ from ..tools import NotificationQueue
 LOG_BUFFER_SIZE = 30
 
 
-@ApiController('dashboard')
+@ApiController('dashboard', Module.GLOBAL)
 class Dashboard(BaseController):
     def __init__(self):
         super(Dashboard, self).__init__()
@@ -40,6 +41,7 @@ class Dashboard(BaseController):
     # pylint: disable=R0914
     @cherrypy.expose
     @cherrypy.tools.json_out()
+    @ReadPermission
     def health(self):
         if not self._log_initialized:
             self._log_initialized = True

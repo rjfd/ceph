@@ -5,14 +5,16 @@ import json
 
 import cherrypy
 
-from . import ApiController, BaseController
+from . import ApiController, BaseController, ReadPermission
 from .. import mgr
+from ..security import Module
 
 
-@ApiController('monitor')
+@ApiController('monitor', Module.MONITOR)
 class Monitor(BaseController):
     @cherrypy.expose
     @cherrypy.tools.json_out()
+    @ReadPermission
     def __call__(self):
         in_quorum, out_quorum = [], []
 
