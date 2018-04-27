@@ -4,6 +4,7 @@ from __future__ import absolute_import
 import time
 
 import cherrypy
+from cherrypy._cpcompat import base64_decode
 
 from .access_control import LocalAuthenticator
 from .. import mgr, logger
@@ -31,13 +32,34 @@ class AuthManagerTool(cherrypy.Tool):
         super(AuthManagerTool, self).__init__(
             'before_handler', self._check_authentication, priority=20)
 
+    def _authenticate_using_auth_header(self):
+        auth_header = cherrypy.request.headers.get('authorization')
+        if auth_header is not None:
+            scheme, params = auth_header.split(' ', 1)
+            if scheme.lower() == 'basic':
+                username, password = base64_decode(params).split(':', 1)
+                logger.debug("Basic authentication user=%s", username)
+                if AuthManager.authenticate(username, password):
+                    now = time.time()
+                    cherrypy.session.regenerate()
+                    cherrypy.session[Session.USERNAME] = username
+                    cherrypy.session[Session.TS] = now
+                    cherrypy.session[Session.EXPIRE_AT_BROWSER_CLOSE] = True
+                    return username
+        return None
+
     def _check_authentication(self):
         username = cherrypy.session.get(Session.USERNAME)
         if not username:
-            logger.debug('Unauthorized access to %s',
-                         cherrypy.url(relative='server'))
-            raise cherrypy.HTTPError(401, 'You are not authorized to access '
-                                          'that resource')
+            username = self._authenticate_using_auth_header()
+            if username is None:
+                logger.debug('Unauthorized access to %s',
+                             cherrypy.url(relative='server'))
+                cherrypy.serving.response.headers[
+                    'www-authenticate'] = 'Basic realm="dashboard"'
+                raise cherrypy.HTTPError(401, 'You are not authorized '
+                                              'to access that resource')
+
         now = time.time()
         expires = float(mgr.get_config(
             'session-expire', Session.DEFAULT_EXPIRE))
