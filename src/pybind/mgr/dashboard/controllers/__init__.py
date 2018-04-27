@@ -80,6 +80,9 @@ def load_controllers():
     return controllers
 
 
+API_MAP = collections.defaultdict(list)
+
+
 def generate_controller_routes(ctrl_class, mapper, base_url):
     inst = ctrl_class()
     for methods, url_suffix, action, params in ctrl_class.endpoints():
@@ -98,6 +101,10 @@ def generate_controller_routes(ctrl_class, mapper, base_url):
 
         logger.debug("Mapping [%s] to %s:%s restricted to %s",
                      url, ctrl_class.__name__, action, methods)
+        API_MAP[url].append({
+            'methods': methods if methods else ['get'],
+            'controller': ctrl_class
+        })
         mapper.connect(name, url, controller=inst, action=action,
                        conditions=conditions)
 
