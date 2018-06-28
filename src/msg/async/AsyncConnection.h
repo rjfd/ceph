@@ -1,4 +1,4 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 /*
  * Ceph - scalable distributed file system
@@ -23,6 +23,8 @@
 #include <list>
 #include <mutex>
 #include <map>
+#include <functional>
+#include <optional>
 
 #include "auth/AuthSessionHandler.h"
 #include "common/ceph_time.h"
@@ -37,6 +39,7 @@
 class AsyncMessenger;
 class DispatchQueue;
 class Worker;
+class Protocol;
 
 static const int ASYNC_IOV_MAX = (IOV_MAX >= 1024 ? IOV_MAX / 4 : IOV_MAX);
 
@@ -56,9 +59,12 @@ class AsyncConnection : public Connection {
     outcoming_bl.claim_append(bl);
     return _try_send(more);
   }
+  void write(bufferlist &bl, std::function<void(ssize_t)> callback,
+             bool more=false);
   ssize_t _try_send(bool more=false);
   ssize_t _send(Message *m);
   void prepare_send_message(uint64_t features, Message *m, bufferlist &bl);
+  void read(unsigned len, std::function<void(char *, ssize_t)> callback);
   ssize_t read_until(unsigned needed, char *p);
   ssize_t _process_connection();
   void _connect();
@@ -196,7 +202,7 @@ class AsyncConnection : public Connection {
     std::lock_guard<std::mutex> l(lock);
     policy.lossy = true;
   }
-  
+
  private:
   enum {
     STATE_NONE,
@@ -307,8 +313,10 @@ class AsyncConnection : public Connection {
   utime_t backoff;         // backoff time
   EventCallbackRef read_handler;
   EventCallbackRef write_handler;
+  EventCallbackRef write_callback_handler;
   EventCallbackRef wakeup_handler;
   EventCallbackRef tick_handler;
+  EventCallbackRef connection_handler;
   char *recv_buf;
   uint32_t recv_max_prefetch;
   uint32_t recv_start;
@@ -355,9 +363,18 @@ class AsyncConnection : public Connection {
   EventCenter *center;
   ceph::shared_ptr<AuthSessionHandler> session_security;
 
+  Protocol *serverProtocol;
+  Protocol *clientProtocol;
+
+  std::optional<std::function<void(ssize_t)>> writeCallback;
+  std::function<void(char *, ssize_t)> readCallback;
+  std::optional<unsigned> pendingReadLen;
+
  public:
   // used by eventcallback
   void handle_write();
+  void handle_write_callback();
+  void continue_read();
   void process();
   void wakeup_from(uint64_t id);
   void tick(uint64_t id);
@@ -377,6 +394,11 @@ class AsyncConnection : public Connection {
   PerfCounters *get_perf_counter() {
     return logger;
   }
+
+  friend class Protocol;
+  friend class ProtocolV1;
+  friend class ClientProtocolV1;
+  friend class ServerProtocolV1;
 }; /* AsyncConnection */
 
 typedef boost::intrusive_ptr<AsyncConnection> AsyncConnectionRef;

@@ -1,4 +1,4 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 /*
  * Ceph - scalable distributed file system
@@ -22,12 +22,14 @@
 #include "AsyncMessenger.h"
 #include "AsyncConnection.h"
 
+#include "Protocol.h"
+
 #include "messages/MOSDOp.h"
 #include "messages/MOSDOpReply.h"
 #include "common/EventTrace.h"
 
 // Constant to limit starting sequence number to 2^31.  Nothing special about it, just a big number.  PLR
-#define SEQ_MASK  0x7fffffff 
+#define SEQ_MASK  0x7fffffff
 
 #define dout_subsys ceph_subsys_ms
 #undef dout_prefix
@@ -64,7 +66,7 @@ class C_handle_read : public EventCallback {
  public:
   explicit C_handle_read(AsyncConnectionRef c): conn(c) {}
   void do_request(uint64_t fd_or_id) override {
-    conn->process();
+    conn->continue_read();
   }
 };
 
@@ -76,6 +78,14 @@ class C_handle_write : public EventCallback {
   void do_request(uint64_t fd) override {
     conn->handle_write();
   }
+};
+
+class C_handle_write_callback : public EventCallback {
+  AsyncConnectionRef conn;
+
+public:
+  explicit C_handle_write_callback(AsyncConnectionRef c) : conn(c) {}
+  void do_request(uint64_t fd) override { conn->handle_write_callback(); }
 };
 
 class C_clean_handler : public EventCallback {
@@ -97,6 +107,17 @@ class C_tick_wakeup : public EventCallback {
     conn->tick(fd_or_id);
   }
 };
+
+class C_handle_connection : public EventCallback {
+  AsyncConnectionRef conn;
+  public:
+  explicit C_handle_connection(AsyncConnectionRef c): conn(c) {}
+  void do_request(uint64_t fd_or_id) override {
+    conn->process();
+  }
+};
+
+
 
 static void alloc_aligned_buffer(bufferlist& data, unsigned len, unsigned off)
 {
@@ -134,12 +155,17 @@ AsyncConnection::AsyncConnection(CephContext *cct, AsyncMessenger *m, DispatchQu
 {
   read_handler = new C_handle_read(this);
   write_handler = new C_handle_write(this);
+  write_callback_handler = new C_handle_write_callback(this);
   wakeup_handler = new C_time_wakeup(this);
   tick_handler = new C_tick_wakeup(this);
+  connection_handler = new C_handle_connection(this);
   // double recv_max_prefetch see "read_until"
   recv_buf = new char[2*recv_max_prefetch];
   state_buffer = new char[4096];
   logger->inc(l_msgr_created_connections);
+
+  serverProtocol = new ServerProtocolV1(this);
+  clientProtocol = new ClientProtocolV1(this);
 }
 
 AsyncConnection::~AsyncConnection()
@@ -152,6 +178,8 @@ AsyncConnection::~AsyncConnection()
   if (state_buffer)
     delete[] state_buffer;
   assert(!delay_state);
+  delete serverProtocol;
+  delete clientProtocol;
 }
 
 void AsyncConnection::maybe_start_delay_thread()
@@ -195,6 +223,22 @@ ssize_t AsyncConnection::read_bulk(char *buf, unsigned len)
   return nread;
 }
 
+void AsyncConnection::write(bufferlist &bl,
+                            std::function<void(ssize_t)> callback, bool more) {
+    std::unique_lock<std::mutex> l(write_lock);
+    writeCallback = callback;
+    outcoming_bl.claim_append(bl);
+    ssize_t r = _try_send(more);
+    if (r <= 0) {
+      // either finish writting, or returned an error
+      writeCallback.reset();
+      l.unlock();
+      lock.unlock();
+      callback(r);
+      return;
+    }
+}
+
 // return the remaining bytes, it may larger than the length of ptr
 // else return < 0 means error
 ssize_t AsyncConnection::_try_send(bool more)
@@ -224,11 +268,31 @@ ssize_t AsyncConnection::_try_send(bool more)
   if (open_write && !is_queued()) {
     center->delete_file_event(cs.fd(), EVENT_WRITABLE);
     open_write = false;
-    if (state_after_send != STATE_NONE)
-      center->dispatch_event_external(read_handler);
+    if (writeCallback) {
+      center->dispatch_event_external(write_callback_handler);
+    }
   }
 
   return outcoming_bl.length();
+}
+
+
+void AsyncConnection::read(unsigned len,
+                           std::function<void(char *, ssize_t)> callback) {
+  readCallback = callback;
+  pendingReadLen = len;
+  ssize_t r = read_until(len, state_buffer);
+  if (r <= 0) {
+    // read all bytes, or an error occured
+    lock.unlock();
+    callback(state_buffer, r);
+  }
+}
+
+void AsyncConnection::continue_read() {
+  if (pendingReadLen) {
+    read(*pendingReadLen, readCallback);
+  }
 }
 
 // Because this func will be called multi times to populate
@@ -314,7 +378,7 @@ ssize_t AsyncConnection::read_until(unsigned len, char *p)
 
 void AsyncConnection::inject_delay() {
   if (async_msgr->cct->_conf->ms_inject_internal_delays) {
-    ldout(async_msgr->cct, 10) << __func__ << " sleep for " << 
+    ldout(async_msgr->cct, 10) << __func__ << " sleep for " <<
       async_msgr->cct->_conf->ms_inject_internal_delays << dendl;
     utime_t t;
     t.set_from_double(async_msgr->cct->_conf->ms_inject_internal_delays);
@@ -709,7 +773,7 @@ void AsyncConnection::process()
           message->set_throttle_stamp(throttle_stamp);
           message->set_recv_complete_stamp(ceph_clock_now());
 
-          // check received seq#.  if it is old, drop the message.  
+          // check received seq#.  if it is old, drop the message.
           // note that incoming messages may skip ahead.  this is convenient for the client
           // side queueing because messages can't be renumbered, but the (kernel) client will
           // occasionally pull a message out of the sent queue to send elsewhere.  in that case
@@ -878,7 +942,7 @@ ssize_t AsyncConnection::_process_connection()
         if (r < 0)
           goto fail;
 
-        center->create_file_event(cs.fd(), EVENT_READABLE, read_handler);
+        center->create_file_event(cs.fd(), EVENT_READABLE, connection_handler);
         state = STATE_CONNECTING_RE;
         break;
       }
@@ -896,28 +960,30 @@ ssize_t AsyncConnection::_process_connection()
         } else if (r == 0) {
           ldout(async_msgr->cct, 10) << __func__ << " nonblock connect inprogress" << dendl;
           if (async_msgr->get_stack()->nonblock_connect_need_writable_event())
-            center->create_file_event(cs.fd(), EVENT_WRITABLE, read_handler);
+            center->create_file_event(cs.fd(), EVENT_WRITABLE, connection_handler);
           break;
         }
 
         center->delete_file_event(cs.fd(), EVENT_WRITABLE);
         ldout(async_msgr->cct, 10) << __func__ << " connect successfully, ready to send banner" << dendl;
 
-        bufferlist bl;
-        bl.append(CEPH_BANNER, strlen(CEPH_BANNER));
-        r = try_send(bl);
-        if (r == 0) {
-          state = STATE_CONNECTING_WAIT_BANNER_AND_IDENTIFY;
-          ldout(async_msgr->cct, 10) << __func__ << " connect write banner done: "
-                                     << get_peer_addr() << dendl;
-        } else if (r > 0) {
-          state = STATE_WAIT_SEND;
-          state_after_send = STATE_CONNECTING_WAIT_BANNER_AND_IDENTIFY;
-          ldout(async_msgr->cct, 10) << __func__ << " connect wait for write banner: "
-                               << get_peer_addr() << dendl;
-        } else {
-          goto fail;
-        }
+        clientProtocol->init();
+
+        // bufferlist bl;
+        // bl.append(CEPH_BANNER, strlen(CEPH_BANNER));
+        // r = try_send(bl);
+        // if (r == 0) {
+        //   state = STATE_CONNECTING_WAIT_BANNER_AND_IDENTIFY;
+        //   ldout(async_msgr->cct, 10) << __func__ << " connect write banner done: "
+        //                              << get_peer_addr() << dendl;
+        // } else if (r > 0) {
+        //   state = STATE_WAIT_SEND;
+        //   state_after_send = STATE_CONNECTING_WAIT_BANNER_AND_IDENTIFY;
+        //   ldout(async_msgr->cct, 10) << __func__ << " connect wait for write banner: "
+        //                        << get_peer_addr() << dendl;
+        // } else {
+        //   goto fail;
+        // }
 
         break;
       }
@@ -1203,26 +1269,28 @@ ssize_t AsyncConnection::_process_connection()
         bufferlist bl;
         center->create_file_event(cs.fd(), EVENT_READABLE, read_handler);
 
-        bl.append(CEPH_BANNER, strlen(CEPH_BANNER));
+        serverProtocol->init();
 
-        encode(async_msgr->get_myaddr(), bl, 0); // legacy
-        port = async_msgr->get_myaddr().get_port();
-        encode(socket_addr, bl, 0); // legacy
-        ldout(async_msgr->cct, 1) << __func__ << " sd=" << cs.fd() << " " << socket_addr << dendl;
+        // bl.append(CEPH_BANNER, strlen(CEPH_BANNER));
 
-        r = try_send(bl);
-        if (r == 0) {
-          state = STATE_ACCEPTING_WAIT_BANNER_ADDR;
-          ldout(async_msgr->cct, 10) << __func__ << " write banner and addr done: "
-            << get_peer_addr() << dendl;
-        } else if (r > 0) {
-          state = STATE_WAIT_SEND;
-          state_after_send = STATE_ACCEPTING_WAIT_BANNER_ADDR;
-          ldout(async_msgr->cct, 10) << __func__ << " wait for write banner and addr: "
-                              << get_peer_addr() << dendl;
-        } else {
-          goto fail;
-        }
+        // encode(async_msgr->get_myaddr(), bl, 0); // legacy
+        // port = async_msgr->get_myaddr().get_port();
+        // encode(socket_addr, bl, 0); // legacy
+        // ldout(async_msgr->cct, 1) << __func__ << " sd=" << cs.fd() << " " << socket_addr << dendl;
+
+        // r = try_send(bl);
+        // if (r == 0) {
+        //   state = STATE_ACCEPTING_WAIT_BANNER_ADDR;
+        //   ldout(async_msgr->cct, 10) << __func__ << " write banner and addr done: "
+        //     << get_peer_addr() << dendl;
+        // } else if (r > 0) {
+        //   state = STATE_WAIT_SEND;
+        //   state_after_send = STATE_ACCEPTING_WAIT_BANNER_ADDR;
+        //   ldout(async_msgr->cct, 10) << __func__ << " wait for write banner and addr: "
+        //                       << get_peer_addr() << dendl;
+        // } else {
+        //   goto fail;
+        // }
 
         break;
       }
@@ -1738,7 +1806,7 @@ ssize_t AsyncConnection::handle_connect_msg(ceph_msg_connect &connect, bufferlis
         if (existing->state == STATE_CLOSED)
           return ;
         assert(existing->state == STATE_NONE);
-  
+
         existing->state = STATE_ACCEPTING_WAIT_CONNECT_MSG;
         existing->center->create_file_event(existing->cs.fd(), EVENT_READABLE, existing->read_handler);
         reply.global_seq = existing->peer_global_seq;
@@ -1814,7 +1882,7 @@ ssize_t AsyncConnection::handle_connect_msg(ceph_msg_connect &connect, bufferlis
   r = async_msgr->accept_conn(this);
 
   inject_delay();
-  
+
   lock.lock();
   replacing = false;
   if (r < 0) {
@@ -1863,7 +1931,7 @@ void AsyncConnection::_connect()
   state = STATE_CONNECTING;
   // rescheduler connection in order to avoid lock dep
   // may called by external thread(send_message)
-  center->dispatch_event_external(read_handler);
+  center->dispatch_event_external(connection_handler);
 }
 
 void AsyncConnection::accept(ConnectedSocket socket, entity_addr_t &addr)
@@ -1876,7 +1944,7 @@ void AsyncConnection::accept(ConnectedSocket socket, entity_addr_t &addr)
   socket_addr = addr;
   state = STATE_ACCEPTING;
   // rescheduler connection in order to avoid lock dep
-  center->dispatch_event_external(read_handler);
+  center->dispatch_event_external(connection_handler);
 }
 
 int AsyncConnection::send_message(Message *m)
@@ -2084,7 +2152,7 @@ void AsyncConnection::fault()
       state = STATE_CONNECTING;
     }
     backoff = utime_t();
-    center->dispatch_event_external(read_handler);
+    center->dispatch_event_external(connection_handler);
   } else {
     if (state == STATE_WAIT) {
       backoff.set_from_double(async_msgr->cct->_conf->ms_max_backoff);
@@ -2146,6 +2214,8 @@ void AsyncConnection::_stop()
   worker->release_worker();
 
   state = STATE_CLOSED;
+  serverProtocol->abort();
+  clientProtocol->abort();
   open_write = false;
   can_write = WriteStatus::CLOSED;
   state_offset = 0;
@@ -2202,7 +2272,7 @@ ssize_t AsyncConnection::write_message(Message *m, bufferlist& bl, bool more)
                                  << "): sig = " << footer.sig << dendl;
     }
   }
-  
+
   outcoming_bl.append(CEPH_MSGR_TAG_MSG);
   outcoming_bl.append((char*)&header, sizeof(header));
 
@@ -2217,7 +2287,7 @@ ssize_t AsyncConnection::write_message(Message *m, bufferlist& bl, bool more)
       outcoming_bl.append((char*)pb.c_str(), pb.length());
     }
   } else {
-    outcoming_bl.claim_append(bl);  
+    outcoming_bl.claim_append(bl);
   }
 
   // send footer; if receiver doesn't support signatures, use the old footer format
@@ -2510,6 +2580,12 @@ void AsyncConnection::handle_write()
   lock.lock();
   fault();
   lock.unlock();
+}
+
+void AsyncConnection::handle_write_callback() {
+  if (writeCallback) {
+    (*writeCallback)(0);
+  }
 }
 
 void AsyncConnection::stop(bool queue_reset) {
