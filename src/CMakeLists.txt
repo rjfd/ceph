@@ -499,6 +499,7 @@ set(libcommon_files
   msg/async/Stack.cc
   msg/async/PosixStack.cc
   msg/async/net_handler.cc
+  msg/async/Protocol.cc
   msg/QueueStrategy.cc
   ${xio_common_srcs}
   ${async_rdma_common_srcs}
