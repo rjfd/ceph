@@ -52,7 +52,7 @@ int main(int argc, const char **argv)
 	argv_to_vec(argc, argv, args);
 
 	auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_ANY,
-			       CODE_ENVIRONMENT_DAEMON,
+			       CODE_ENVIRONMENT_UTILITY,
 			       CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
 
 	for (arg_iter = args.begin(); arg_iter != args.end();) {
@@ -89,7 +89,7 @@ int main(int argc, const char **argv)
 
 	// Set up crypto, daemonize, etc.
 	//global_init_daemonize(g_ceph_context, 0);
-	common_init_finish(g_ceph_context);
+	//common_init_finish(g_ceph_context);
 
 	dispatcher = new SimpleDispatcher(messenger);
 

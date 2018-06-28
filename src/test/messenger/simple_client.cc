@@ -146,6 +146,11 @@ int main(int argc, const char **argv)
 	  conn->send_message(m);
 	}
 
+	struct timespec tss;
+	tss.tv_sec = 20;
+	tss.tv_nsec = 0;
+	nanosleep(&tss, NULL);
+
 	// do stuff
 	while (conn->is_connected()) {
 	  nanosleep(&ts, NULL);
