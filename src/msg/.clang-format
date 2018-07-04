@@ -1,0 +1,9 @@
+BasedOnStyle: Google
+Language: Cpp
+ColumnLimit: 80
+AccessModifierOffset: -2
+IndentWidth: 2
+DerivePointerAlignment: false
+PointerAlignment: Right
+AlignAfterOpenBracket: Align
+IndentCaseLabels: true

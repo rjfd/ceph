@@ -1,0 +1,27 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "browse": {
+                "path": [
+                    "${workspaceFolder}",
+                    "/home/rdias/Work/ceph-msgr/src"
+                ],
+                "limitSymbolsToIncludedHeaders": true
+            },
+            "includePath": [
+                "${workspaceFolder}/msg",
+                "/home/rdias/Work/ceph-msgr/src",
+                "/home/rdias/Work/ceph-msgr/include",
+                "/home/rdias/Work/ceph-msgr/msg",
+                "/home/rdias/Work/ceph-msgr/msg/async"
+            ],
+            "defines": [],
+            "compilerPath": "/usr/bin/clang",
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "clang-x64"
+        }
+    ],
+    "version": 4
+}
