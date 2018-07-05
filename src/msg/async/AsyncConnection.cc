@@ -285,6 +285,7 @@ void AsyncConnection::read(unsigned len,
   if (r <= 0) {
     // read all bytes, or an error occured
     lock.unlock();
+    pendingReadLen.reset();
     callback(state_buffer, r);
   }
 }
@@ -942,7 +943,7 @@ ssize_t AsyncConnection::_process_connection()
         if (r < 0)
           goto fail;
 
-        center->create_file_event(cs.fd(), EVENT_READABLE, connection_handler);
+        center->create_file_event(cs.fd(), EVENT_READABLE, read_handler);
         state = STATE_CONNECTING_RE;
         break;
       }
