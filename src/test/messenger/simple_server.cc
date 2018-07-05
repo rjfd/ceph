@@ -83,6 +83,7 @@ int main(int argc, const char **argv)
 	messenger->set_default_policy(
 	  Messenger::Policy::stateless_server(0));
 
+	bind_addr.set_type(entity_addr_t::TYPE_DEFAULT);
 	r = messenger->bind(bind_addr);
 	if (r < 0)
 		goto out;
