@@ -1,6 +1,9 @@
 #ifndef _MSG_ASYNC_PROTOCOL_
 #define _MSG_ASYNC_PROTOCOL_
 
+#include "include/buffer.h"
+#include "include/msgr.h"
+
 class AsyncConnection;
 class AsyncMessenger;
 
@@ -65,6 +68,20 @@ private:
   void handle_server_banner(char *buffer, int r);
   void handle_my_addr_write(int r);
   void send_connect_message();
+  void handle_connect_message_write(int r);
+  void wait_connect_reply();
+  void handle_connect_reply_1(char *buffer, int r);
+
+  void wait_connect_reply_auth();
+  void handle_connect_reply_auth(char *buffer, int r);
+
+  void handle_connect_reply_2();
+
+  void wait_ack_seq();
+  void handle_ack_seq(char *buffer, int r);
+  void handle_in_seq_write(int r);
+
+  void ready();
 
 public:
   ClientProtocolV1(AsyncConnection *connection);
@@ -74,11 +91,25 @@ public:
 
 class ServerProtocolV1 : public ProtocolV1 {
 private:
+  bufferlist authorizer_reply;
+  ceph_msg_connect_reply reply;
+
   void accept();
   void handle_banner_write(int r);
   void wait_client_banner();
   void handle_client_banner(char *buffer, int r);
   void wait_connect_message();
+  void handle_connect_message_1(char *buffer, int r);
+
+  void wait_connect_message_auth();
+  void handle_connect_message_auth(char *buffer, int r);
+
+  void handle_connect_message_2();
+
+  void send_connect_message_reply(char tag);
+  void handle_connect_message_reply_write(int r);
+
+  void open();
 
 public:
   ServerProtocolV1(AsyncConnection *connection);
