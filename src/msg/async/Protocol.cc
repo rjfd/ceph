@@ -47,13 +47,31 @@ ProtocolV1::ProtocolV1(AsyncConnection *connection)
       peer_global_seq(0),
       msg_left(0),
       cur_msg_size(0),
-      _abort(false) {}
+      _abort(false),
+      state(NOT_INITIATED) {}
 
 void ProtocolV1::handle_failure(int r) { connection->fault(); }
 
 void ProtocolV1::abort() {
   std::lock_guard<std::mutex> l(connection->lock);
   _abort = true;
+  state = CLOSED;
+}
+
+void ProtocolV1::notify() {
+  ldout(cct, 20) << __func__ << " BEGIN" << dendl;
+  ldout(cct, 20) << __func__ << " state=" << state << dendl;
+  ldout(cct, 20) << __func__ << " BEGIN" << dendl;
+  switch (state) {
+    case NOT_INITIATED:
+      init();
+      break;
+    case OPENED:
+      wait_message();
+      break;
+    default:
+      break;
+  }
 }
 
 void ProtocolV1::wait_message() {
@@ -617,7 +635,10 @@ ClientProtocolV1::ClientProtocolV1(AsyncConnection *connection)
       got_bad_auth(false),
       authorizer(nullptr) {}
 
-void ClientProtocolV1::init() { send_banner(); }
+void ClientProtocolV1::init() {
+  state = INITIATING;
+  send_banner();
+}
 
 void ClientProtocolV1::send_banner() {
   ldout(cct, 20) << __func__ << " BEGIN" << dendl;
@@ -1123,6 +1144,7 @@ void ClientProtocolV1::ready() {
 
   ldout(cct, 20) << __func__ << " END" << dendl;
 
+  state = OPENED;
   wait_message();
 }
 
@@ -1135,7 +1157,10 @@ ServerProtocolV1::ServerProtocolV1(AsyncConnection *connection)
       is_reset_from_peer(false),
       wait_for_seq(false) {}
 
-void ServerProtocolV1::init() { accept(); }
+void ServerProtocolV1::init() {
+  state = INITIATING;
+  accept();
+}
 
 void ServerProtocolV1::accept() {
   ldout(cct, 20) << __func__ << " BEGIN" << dendl;
@@ -2116,5 +2141,6 @@ void ServerProtocolV1::ready() {
 
   ldout(cct, 20) << __func__ << " END" << dendl;
 
+  state = OPENED;
   wait_message();
 }

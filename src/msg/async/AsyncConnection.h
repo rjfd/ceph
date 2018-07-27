@@ -363,8 +363,7 @@ class AsyncConnection : public Connection {
   EventCenter *center;
   ceph::shared_ptr<AuthSessionHandler> session_security;
 
-  Protocol *serverProtocol;
-  Protocol *clientProtocol;
+  std::unique_ptr<Protocol> protocol;
 
   std::optional<std::function<void(ssize_t)>> writeCallback;
   std::function<void(char *, ssize_t)> readCallback;

@@ -18,10 +18,18 @@ public:
   virtual ~Protocol();
   virtual void init() = 0;
   virtual void abort() = 0;
+  virtual void notify() = 0;
 };
 
 class ProtocolV1 : public Protocol {
 protected:
+  enum State {
+    NOT_INITIATED,
+    INITIATING,
+    OPENED,
+    CLOSED
+  };
+
   __u32 connect_seq, peer_global_seq;
   std::atomic<uint64_t> in_seq{0};
   std::atomic<uint64_t> ack_left{0};
@@ -39,6 +47,8 @@ protected:
   bufferlist data_buf;
   bufferlist::iterator data_blp;
   bufferlist front, middle, data;
+
+  State state;
 
   void handle_failure(int r = 0);
   bool _abort;
@@ -67,6 +77,7 @@ public:
 
   virtual void init() = 0;
   virtual void abort();
+  virtual void notify();
 };
 
 class ClientProtocolV1 : public ProtocolV1 {
