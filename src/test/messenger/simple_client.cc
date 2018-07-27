@@ -117,7 +117,7 @@ int main(int argc, const char **argv)
 	dest_str += port;
 	entity_addr_from_url(&dest_addr, dest_str.c_str());
 	dest_addr.set_type(entity_addr_t::TYPE_DEFAULT);
-	entity_inst_t dest_server(entity_name_t::OSD(-1), dest_addr);
+	entity_inst_t dest_server(entity_name_t::MON(-1), dest_addr);
 
 	dispatcher = new SimpleDispatcher(messenger);
 	messenger->add_dispatcher_head(dispatcher);
@@ -135,17 +135,17 @@ int main(int argc, const char **argv)
 
 	t1 = time(NULL);
 
-	// int msg_ix;
-	// Message *m;
-	// for (msg_ix = 0; msg_ix < n_msgs; ++msg_ix) {
-	//   /* add a data payload if asked */
-	//   if (! n_dsize) {
-	//     m = new MPing();
-	//   } else {
-	//     m = new_simple_ping_with_data("simple_client", n_dsize);
-	//   }
-	//   conn->send_message(m);
-	// }
+	int msg_ix;
+	Message *m;
+	for (msg_ix = 0; msg_ix < n_msgs; ++msg_ix) {
+	  /* add a data payload if asked */
+	  if (! n_dsize) {
+	    m = new MPing();
+	  } else {
+	    m = new_simple_ping_with_data("simple_client", n_dsize);
+	  }
+	  conn->send_message(m);
+	}
 
 	struct timespec tss;
 	tss.tv_sec = 900;
