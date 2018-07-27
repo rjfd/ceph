@@ -1,16 +1,17 @@
 #ifndef _MSG_ASYNC_PROTOCOL_
 #define _MSG_ASYNC_PROTOCOL_
 
+#include "AsyncConnection.h"
 #include "include/buffer.h"
 #include "include/msgr.h"
 
-class AsyncConnection;
 class AsyncMessenger;
 
 class Protocol {
 protected:
   AsyncConnection *connection;
   AsyncMessenger *messenger;
+  CephContext *cct;
 
 public:
   Protocol(AsyncConnection *connection);
@@ -21,37 +22,45 @@ public:
 
 class ProtocolV1 : public Protocol {
 protected:
-  enum {
-    STATE_OPEN_KEEPALIVE2,
-    STATE_OPEN_KEEPALIVE2_ACK,
-    STATE_OPEN_TAG_ACK,
-    STATE_OPEN_MESSAGE_HEADER,
-    STATE_OPEN_MESSAGE_THROTTLE_MESSAGE,
-    STATE_OPEN_MESSAGE_THROTTLE_BYTES,
-    STATE_OPEN_MESSAGE_THROTTLE_DISPATCH_QUEUE,
-    STATE_OPEN_MESSAGE_READ_FRONT,
-    STATE_OPEN_MESSAGE_READ_MIDDLE,
-    STATE_OPEN_MESSAGE_READ_DATA_PREPARE,
-    STATE_OPEN_MESSAGE_READ_DATA,
-    STATE_OPEN_MESSAGE_READ_FOOTER_AND_DISPATCH,
-    STATE_OPEN_TAG_CLOSE,
-    STATE_CONNECTING,
-    STATE_CONNECTING_WAIT_BANNER_AND_IDENTIFY,
-    STATE_CONNECTING_SEND_CONNECT_MSG,
-    STATE_CONNECTING_WAIT_CONNECT_REPLY,
-    STATE_CONNECTING_WAIT_CONNECT_REPLY_AUTH,
-    STATE_CONNECTING_WAIT_ACK_SEQ,
-    STATE_CONNECTING_READY,
-    STATE_ACCEPTING,
-    STATE_ACCEPTING_WAIT_BANNER_ADDR,
-    STATE_ACCEPTING_WAIT_CONNECT_MSG,
-    STATE_ACCEPTING_WAIT_CONNECT_MSG_AUTH,
-    STATE_ACCEPTING_WAIT_SEQ,
-    STATE_ACCEPTING_READY,
-  };
+  __u32 connect_seq, peer_global_seq;
+  std::atomic<uint64_t> in_seq{0};
+  std::atomic<uint64_t> ack_left{0};
 
-  void handle_failure(int r=0);
+  // Open state
+  ceph_msg_connect connect_msg;
+  ceph_msg_connect_reply connect_reply;
+  bufferlist authorizer_buf;
+
+  utime_t recv_stamp;
+  utime_t throttle_stamp;
+  unsigned msg_left;
+  uint64_t cur_msg_size;
+  ceph_msg_header current_header;
+  bufferlist data_buf;
+  bufferlist::iterator data_blp;
+  bufferlist front, middle, data;
+
+  void handle_failure(int r = 0);
   bool _abort;
+
+  void wait_message();
+  void handle_message(char *buffer, int r);
+
+  void handle_keepalive2(char *buffer, int r);
+  void handle_keepalive2_ack(char *buffer, int r);
+  void handle_tag_ack(char *buffer, int r);
+
+  void handle_message_header(char *buffer, int r);
+  void throttle_message();
+  void read_message_front();
+  void handle_message_front(char *buffer, int r);
+  void read_message_middle();
+  void handle_message_middle(char *buffer, int r);
+  void read_message_data_prepare();
+  void read_message_data();
+  void handle_message_data(char *buffer, int r);
+  void read_message_footer();
+  void handle_message_footer(char *buffer, int r);
 
 public:
   ProtocolV1(AsyncConnection *connection);
@@ -62,6 +71,15 @@ public:
 
 class ClientProtocolV1 : public ProtocolV1 {
 private:
+  int global_seq;
+
+  std::atomic<uint64_t> out_seq{0};
+  std::atomic<uint64_t> in_seq{0};
+
+  // Connecting state
+  bool got_bad_auth;
+  AuthAuthorizer *authorizer;
+
   void send_banner();
   void handle_banner_write(int r);
   void wait_server_banner();
@@ -92,7 +110,9 @@ public:
 class ServerProtocolV1 : public ProtocolV1 {
 private:
   bufferlist authorizer_reply;
-  ceph_msg_connect_reply reply;
+  AsyncConnectionRef existing;
+  bool is_reset_from_peer;
+  bool wait_for_seq;
 
   void accept();
   void handle_banner_write(int r);
@@ -109,7 +129,14 @@ private:
   void send_connect_message_reply(char tag);
   void handle_connect_message_reply_write(int r);
 
+  void replace();
   void open();
+  void handle_ready_connect_message_reply_write(int r);
+
+  void wait_seq();
+  void handle_seq(char *buffer, int r);
+
+  void ready();
 
 public:
   ServerProtocolV1(AsyncConnection *connection);
