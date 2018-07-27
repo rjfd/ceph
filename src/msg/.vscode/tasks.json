@@ -10,7 +10,8 @@
       "args": [
         "-j4",
         "simple_client",
-        "simple_server"
+        "simple_server",
+        "ceph_test_msgr"
       ],
       "group": {
         "kind": "build",

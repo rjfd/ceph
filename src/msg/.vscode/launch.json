@@ -41,6 +41,25 @@
           "ignoreFailures": true
         }
       ]
+    },
+    {
+      "name": "Test",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "/home/rdias/Work/ceph-msgr/build/bin/ceph_test_msgr",
+      "args": ["--debug-ms=30"],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
     }
   ]
 }
