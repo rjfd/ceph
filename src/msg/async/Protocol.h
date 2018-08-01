@@ -19,19 +19,20 @@ public:
   virtual void init() = 0;
   virtual void abort() = 0;
   virtual void notify() = 0;
+  virtual void reconnect() = 0;
+
+  virtual void send_message(Message *m) = 0;
+  virtual void write_event() = 0;
+  virtual void fault() = 0;
 };
 
 class ProtocolV1 : public Protocol {
 protected:
-  enum State {
-    NOT_INITIATED,
-    INITIATING,
-    OPENED,
-    CLOSED
-  };
+  enum State { NOT_INITIATED, INITIATING, OPENED, CLOSED };
 
   __u32 connect_seq, peer_global_seq;
   std::atomic<uint64_t> in_seq{0};
+  std::atomic<uint64_t> out_seq{0};
   std::atomic<uint64_t> ack_left{0};
 
   // Open state
@@ -72,20 +73,30 @@ protected:
   void read_message_footer();
   void handle_message_footer(char *buffer, int r);
 
+  void session_reset();
+  void randomize_out_seq();
+
+  void prepare_send_message(uint64_t features, Message *m, bufferlist &bl);
+  ssize_t write_message(Message *m, bufferlist& bl, bool more);
+
+  ostream &_conn_prefix(std::ostream *_dout);
+
 public:
   ProtocolV1(AsyncConnection *connection);
 
   virtual void init() = 0;
   virtual void abort();
   virtual void notify();
+  virtual void reconnect();
+
+  virtual void send_message(Message *m);
+  virtual void write_event();
+  virtual void fault();
 };
 
 class ClientProtocolV1 : public ProtocolV1 {
 private:
   int global_seq;
-
-  std::atomic<uint64_t> out_seq{0};
-  std::atomic<uint64_t> in_seq{0};
 
   // Connecting state
   bool got_bad_auth;

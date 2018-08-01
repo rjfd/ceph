@@ -1,10 +1,19 @@
 #include "Protocol.h"
 
 #include "AsyncMessenger.h"
+#include "include/random.h"
+#include "common/EventTrace.h"
 
 #define dout_subsys ceph_subsys_ms
-//#undef dout_prefix
-//#define dout_prefix connection->_conn_prefix(_dout)
+#undef dout_prefix
+#define dout_prefix _conn_prefix(_dout)
+ostream &ProtocolV1::_conn_prefix(std::ostream *_dout) {
+  return *_dout << "-- " << messenger->get_myaddr() << " >> "
+                << connection->peer_addr << " conn(" << this << " :"
+                << connection->port << " s=" << state
+                << " pgs=" << peer_global_seq << " cs=" << connect_seq
+                << " l=" << connection->policy.lossy << ").";
+}
 
 #define WRITE(B, F) \
   connection->write(B, std::bind(F, this, std::placeholders::_1))
@@ -12,6 +21,12 @@
 #define READ(L, F)  \
   connection->read( \
       L, std::bind(F, this, std::placeholders::_1, std::placeholders::_2))
+
+// Constant to limit starting sequence number to 2^31.  Nothing special about
+// it, just a big number.  PLR
+#define SEQ_MASK 0x7fffffff
+
+const int ASYNC_COALESCE_THRESHOLD = 256;
 
 static void alloc_aligned_buffer(bufferlist &data, unsigned len, unsigned off) {
   // create a buffer to read into that matches the data alignment
@@ -47,15 +62,37 @@ ProtocolV1::ProtocolV1(AsyncConnection *connection)
       peer_global_seq(0),
       msg_left(0),
       cur_msg_size(0),
-      _abort(false),
-      state(NOT_INITIATED) {}
+      state(NOT_INITIATED),
+      _abort(false) {}
 
-void ProtocolV1::handle_failure(int r) { connection->fault(); }
+void ProtocolV1::handle_failure(int r) {
+  if (state == NOT_INITIATED || state == CLOSED) {
+    ldout(cct, 10) << __func__ << " connection is already closed" << dendl;
+    return;
+  }
+
+  if (connection->policy.lossy && state != INITIATING) {
+    ldout(cct, 1) << __func__ << " on lossy channel, failing" << dendl;
+    connection->lock.unlock();
+    connection->stop(true);
+    connection->lock.lock();
+    return;
+  }
+
+  // requeue sent items
+  out_seq -= connection->requeue_sent();
+
+  connection->fault();
+}
 
 void ProtocolV1::abort() {
-  std::lock_guard<std::mutex> l(connection->lock);
   _abort = true;
   state = CLOSED;
+}
+
+void ProtocolV1::reconnect() {
+  state = NOT_INITIATED;
+  connect_seq++;
 }
 
 void ProtocolV1::notify() {
@@ -625,6 +662,292 @@ void ProtocolV1::handle_message_footer(char *buffer, int r) {
   wait_message();
 }
 
+void ProtocolV1::session_reset() {
+  ldout(cct, 10) << __func__ << " started" << dendl;
+  std::lock_guard<std::mutex> l(connection->write_lock);
+  if (connection->delay_state) connection->delay_state->discard();
+
+  connection->dispatch_queue->discard_queue(connection->conn_id);
+  connection->discard_out_queue();
+  // note: we need to clear outcoming_bl here, but session_reset may be
+  // called by other thread, so let caller clear this itself!
+  // outcoming_bl.clear();
+
+  connection->dispatch_queue->queue_remote_reset(connection);
+
+  randomize_out_seq();
+
+  in_seq = 0;
+  connect_seq = 0;
+  // it's safe to directly set 0, double locked
+  ack_left = 0;
+  connection->once_ready = false;
+  connection->can_write = AsyncConnection::WriteStatus::NOWRITE;
+}
+
+void ProtocolV1::randomize_out_seq() {
+  if (connection->get_features() & CEPH_FEATURE_MSG_AUTH) {
+    // Set out_seq to a random value, so CRC won't be predictable.
+    auto rand_seq = ceph::util::generate_random_number<uint64_t>(0, SEQ_MASK);
+    ldout(cct, 10) << __func__ << " randomize_out_seq " << rand_seq << dendl;
+    out_seq = rand_seq;
+  } else {
+    // previously, seq #'s always started at 0.
+    out_seq = 0;
+  }
+}
+
+void ProtocolV1::prepare_send_message(uint64_t features, Message *m,
+                                      bufferlist &bl) {
+  ldout(cct, 20) << __func__ << " m " << *m << dendl;
+
+  // associate message with Connection (for benefit of encode_payload)
+  if (m->empty_payload()) {
+    ldout(cct, 20) << __func__ << " encoding features " << features << " " << m
+                   << " " << *m << dendl;
+  } else {
+    ldout(cct, 20) << __func__ << " half-reencoding features " << features
+                   << " " << m << " " << *m << dendl;
+  }
+
+  // encode and copy out of *m
+  m->encode(features, messenger->crcflags);
+
+  bl.append(m->get_payload());
+  bl.append(m->get_middle());
+  bl.append(m->get_data());
+}
+
+void ProtocolV1::send_message(Message *m) {
+  bufferlist bl;
+  uint64_t f = connection->get_features();
+
+  // TODO: Currently not all messages supports reencode like MOSDMap, so here
+  // only let fast dispatch support messages prepare message
+  bool can_fast_prepare = messenger->ms_can_fast_dispatch(m);
+  if (can_fast_prepare) {
+    prepare_send_message(f, m, bl);
+  }
+
+  std::lock_guard<std::mutex> l(connection->write_lock);
+  // "features" changes will change the payload encoding
+  if (can_fast_prepare &&
+      (connection->can_write == AsyncConnection::WriteStatus::NOWRITE ||
+       connection->get_features() != f)) {
+    // ensure the correctness of message encoding
+    bl.clear();
+    m->get_payload().clear();
+    ldout(cct, 5) << __func__ << " clear encoded buffer previous " << f
+                  << " != " << connection->get_features() << dendl;
+  }
+  if (connection->can_write == AsyncConnection::WriteStatus::CLOSED) {
+    ldout(cct, 10) << __func__ << " connection closed."
+                   << " Drop message " << m << dendl;
+    m->put();
+  } else {
+    m->trace.event("async enqueueing message");
+    connection->out_q[m->get_priority()].emplace_back(std::move(bl), m);
+    ldout(cct, 15) << __func__ << " inline write is denied, reschedule m=" << m
+                   << dendl;
+    if (connection->can_write != AsyncConnection::WriteStatus::REPLACING) {
+      connection->center->dispatch_event_external(connection->write_handler);
+    }
+  }
+}
+
+ssize_t ProtocolV1::write_message(Message *m, bufferlist &bl, bool more) {
+  FUNCTRACE(cct);
+  assert(connection->center->in_thread());
+  m->set_seq(++out_seq);
+
+  if (messenger->crcflags & MSG_CRC_HEADER) {
+    m->calc_header_crc();
+  }
+
+  ceph_msg_header &header = m->get_header();
+  ceph_msg_footer &footer = m->get_footer();
+
+  // TODO: let sign_message could be reentry?
+  // Now that we have all the crcs calculated, handle the
+  // digital signature for the message, if the AsyncConnection has session
+  // security set up.  Some session security options do not
+  // actually calculate and check the signature, but they should
+  // handle the calls to sign_message and check_signature.  PLR
+  if (connection->session_security.get() == NULL) {
+    ldout(cct, 20) << __func__ << " no session security" << dendl;
+  } else {
+    if (connection->session_security->sign_message(m)) {
+      ldout(cct, 20) << __func__ << " failed to sign m=" << m
+                     << "): sig = " << footer.sig << dendl;
+    } else {
+      ldout(cct, 20) << __func__ << " signed m=" << m
+                     << "): sig = " << footer.sig << dendl;
+    }
+  }
+
+  connection->outcoming_bl.append(CEPH_MSGR_TAG_MSG);
+  connection->outcoming_bl.append((char *)&header, sizeof(header));
+
+  ldout(cct, 20) << __func__ << " sending message type=" << header.type
+                 << " src " << entity_name_t(header.src)
+                 << " front=" << header.front_len << " data=" << header.data_len
+                 << " off " << header.data_off << dendl;
+
+  if ((bl.length() <= ASYNC_COALESCE_THRESHOLD) && (bl.buffers().size() > 1)) {
+    for (const auto &pb : bl.buffers()) {
+      connection->outcoming_bl.append((char *)pb.c_str(), pb.length());
+    }
+  } else {
+    connection->outcoming_bl.claim_append(bl);
+  }
+
+  // send footer; if receiver doesn't support signatures, use the old footer
+  // format
+  ceph_msg_footer_old old_footer;
+  if (connection->has_feature(CEPH_FEATURE_MSG_AUTH)) {
+    connection->outcoming_bl.append((char *)&footer, sizeof(footer));
+  } else {
+    if (messenger->crcflags & MSG_CRC_HEADER) {
+      old_footer.front_crc = footer.front_crc;
+      old_footer.middle_crc = footer.middle_crc;
+      old_footer.data_crc = footer.data_crc;
+    } else {
+      old_footer.front_crc = old_footer.middle_crc = 0;
+    }
+    old_footer.data_crc =
+        messenger->crcflags & MSG_CRC_DATA ? footer.data_crc : 0;
+    old_footer.flags = footer.flags;
+    connection->outcoming_bl.append((char *)&old_footer, sizeof(old_footer));
+  }
+
+  m->trace.event("async writing message");
+  ldout(cct, 20) << __func__ << " sending " << m->get_seq() << " " << m
+                 << dendl;
+  ssize_t total_send_size = connection->outcoming_bl.length();
+  ssize_t rc = connection->_try_send(more);
+  if (rc < 0) {
+    ldout(cct, 1) << __func__ << " error sending " << m << ", "
+                  << cpp_strerror(rc) << dendl;
+  } else {
+    connection->logger->inc(
+        l_msgr_send_bytes, total_send_size - connection->outcoming_bl.length());
+    ldout(cct, 10) << __func__ << " sending " << m
+                   << (rc ? " continuely." : " done.") << dendl;
+  }
+  if (m->get_type() == CEPH_MSG_OSD_OP)
+    OID_EVENT_TRACE_WITH_MSG(m, "SEND_MSG_OSD_OP_END", false);
+  else if (m->get_type() == CEPH_MSG_OSD_OPREPLY)
+    OID_EVENT_TRACE_WITH_MSG(m, "SEND_MSG_OSD_OPREPLY_END", false);
+  m->put();
+
+  return rc;
+}
+
+void ProtocolV1::write_event() {
+  ldout(cct, 10) << __func__ << dendl;
+  ssize_t r = 0;
+
+  connection->write_lock.lock();
+  if (connection->can_write == AsyncConnection::WriteStatus::CANWRITE) {
+    if (connection->keepalive) {
+      connection->_append_keepalive_or_ack();
+      connection->keepalive = false;
+    }
+
+    auto start = ceph::mono_clock::now();
+    bool more;
+    do {
+      bufferlist data;
+      Message *m = connection->_get_next_outgoing(&data);
+      if (!m) {
+        break;
+      }
+
+      if (!connection->policy.lossy) {
+        // put on sent list
+        connection->sent.push_back(m);
+        m->get();
+      }
+      more = connection->_has_next_outgoing();
+      connection->write_lock.unlock();
+
+      // send_message or requeue messages may not encode message
+      if (!data.length()) {
+        prepare_send_message(connection->get_features(), m, data);
+      }
+
+      r = write_message(m, data, more);
+
+      connection->write_lock.lock();
+      if (r == 0) {
+        ;
+      } else if (r < 0) {
+        ldout(cct, 1) << __func__ << " send msg failed" << dendl;
+        break;
+      } else if (r > 0)
+        break;
+    } while (connection->can_write == AsyncConnection::WriteStatus::CANWRITE);
+    connection->write_lock.unlock();
+
+    // if r > 0 mean data still lefted, so no need _try_send.
+    connection->lock.lock();
+    if (r == 0) {
+      uint64_t left = ack_left;
+      if (left) {
+        ceph_le64 s;
+        s = in_seq;
+        connection->outcoming_bl.append(CEPH_MSGR_TAG_ACK);
+        connection->outcoming_bl.append((char *)&s, sizeof(s));
+        ldout(cct, 10) << __func__ << " try send msg ack, acked " << left
+                       << " messages" << dendl;
+        ack_left -= left;
+        left = ack_left;
+        r = connection->_try_send(left);
+      } else if (connection->is_queued()) {
+        r = connection->_try_send();
+      }
+    }
+    connection->lock.unlock();
+
+    connection->logger->tinc(l_msgr_running_send_time, ceph::mono_clock::now() - start);
+    if (r < 0) {
+      ldout(cct, 1) << __func__ << " send msg failed" << dendl;
+      connection->lock.lock();
+      handle_failure(r);
+      connection->lock.unlock();
+      return;
+    }
+  } else {
+    connection->write_lock.unlock();
+    connection->lock.lock();
+    connection->write_lock.lock();
+    if (connection->state == AsyncConnection::STATE_STANDBY &&
+        !connection->policy.server && connection->is_queued()) {
+      ldout(cct, 10) << __func__ << " policy.server is false" << dendl;
+      connection->_connect();
+    } else if (connection->cs &&
+               connection->state != AsyncConnection::STATE_NONE &&
+               connection->state != AsyncConnection::STATE_CONNECTING &&
+               connection->state != AsyncConnection::STATE_CONNECTING_RE &&
+               connection->state != AsyncConnection::STATE_CLOSED) {
+      r = connection->_try_send();
+      if (r < 0) {
+        ldout(cct, 1) << __func__ << " send outcoming bl failed" << dendl;
+        connection->write_lock.unlock();
+        handle_failure(r);
+        connection->lock.unlock();
+        return;
+      }
+    }
+    connection->write_lock.unlock();
+    connection->lock.unlock();
+  }
+}
+
+void ProtocolV1::fault() {
+  handle_failure();
+}
+
 /**
  * Client Protocol V1
  **/
@@ -637,6 +960,17 @@ ClientProtocolV1::ClientProtocolV1(AsyncConnection *connection)
 
 void ClientProtocolV1::init() {
   state = INITIATING;
+
+  _abort = false;
+  authorizer_buf.clear();
+  memset(&connect_msg, 0, sizeof(connect_msg));
+  memset(&connect_reply, 0, sizeof(connect_reply));
+
+  global_seq = messenger->get_global_seq();
+  got_bad_auth = false;
+  delete authorizer;
+  authorizer = nullptr;
+
   send_banner();
 }
 
@@ -653,7 +987,6 @@ void ClientProtocolV1::send_banner() {
 void ClientProtocolV1::handle_banner_write(int r) {
   ldout(cct, 20) << __func__ << " BEGIN" << dendl;
 
-  std::lock_guard<std::mutex> l(connection->lock);
   if (r < 0) {
     handle_failure(r);
     return;
@@ -679,8 +1012,6 @@ void ClientProtocolV1::wait_server_banner() {
 
 void ClientProtocolV1::handle_server_banner(char *buffer, int r) {
   ldout(cct, 20) << __func__ << " BEGIN" << dendl;
-
-  std::lock_guard<std::mutex> l(connection->lock);
 
   if (r < 0) {
     ldout(cct, 1) << __func__ << " read banner and identify addresses failed"
@@ -766,7 +1097,6 @@ void ClientProtocolV1::handle_server_banner(char *buffer, int r) {
 void ClientProtocolV1::handle_my_addr_write(int r) {
   ldout(cct, 20) << __func__ << " BEGIN" << dendl;
 
-  std::lock_guard<std::mutex> l(connection->lock);
   if (r < 0) {
     ldout(cct, 2) << __func__ << " connect couldn't write my addr, "
                   << cpp_strerror(r) << dendl;
@@ -967,10 +1297,10 @@ void ClientProtocolV1::handle_connect_reply_2() {
 
   if (connect_reply.tag == CEPH_MSGR_TAG_RESETSESSION) {
     ldout(cct, 0) << __func__ << " connect got RESETSESSION" << dendl;
-    connection->was_session_reset();
+    session_reset();
     connect_seq = 0;
 
-    // see was_session_reset
+    // see session_reset
     connection->outcoming_bl.clear();
 
     ldout(cct, 20) << __func__ << " END" << dendl;
@@ -1060,7 +1390,7 @@ void ClientProtocolV1::handle_ack_seq(char *buffer, int r) {
   newly_acked_seq = *((uint64_t *)buffer);
   ldout(cct, 2) << __func__ << " got newly_acked_seq " << newly_acked_seq
                 << " vs out_seq " << out_seq << dendl;
-  connection->discard_requeued_up_to(newly_acked_seq);
+  out_seq = connection->discard_requeued_up_to(out_seq, newly_acked_seq);
 
   bufferlist bl;
   uint64_t s = in_seq;
@@ -1183,7 +1513,6 @@ void ServerProtocolV1::accept() {
 void ServerProtocolV1::handle_banner_write(int r) {
   ldout(cct, 20) << __func__ << " BEGIN" << dendl;
 
-  std::lock_guard<std::mutex> l(connection->lock);
   if (r < 0) {
     handle_failure(r);
     return;
@@ -1208,7 +1537,6 @@ void ServerProtocolV1::wait_client_banner() {
 void ServerProtocolV1::handle_client_banner(char *buffer, int r) {
   ldout(cct, 20) << __func__ << " BEGIN" << dendl;
 
-  std::lock_guard<std::mutex> l(connection->lock);
   if (r < 0) {
     ldout(cct, 1) << __func__ << " read peer banner and addr failed" << dendl;
     handle_failure(r);
@@ -1436,31 +1764,34 @@ void ServerProtocolV1::handle_connect_message_2() {
       return;
     }
 
+    ServerProtocolV1 *exproto =
+        dynamic_cast<ServerProtocolV1 *>(existing->protocol.get());
+
     if (existing->replacing) {
       ldout(cct, 1) << __func__
                     << " existing racing replace happened while replacing."
                     << " existing_state="
                     << connection->get_state_name(existing->state) << dendl;
-      connect_reply.global_seq = existing->peer_global_seq;
+      connect_reply.global_seq = exproto->peer_global_seq;
       existing->lock.unlock();
       send_connect_message_reply(CEPH_MSGR_TAG_RETRY_GLOBAL);
       ldout(cct, 20) << __func__ << " END" << dendl;
       return;
     }
 
-    if (connect_msg.global_seq < existing->peer_global_seq) {
+    if (connect_msg.global_seq < exproto->peer_global_seq) {
       ldout(cct, 10) << __func__ << " accept existing " << existing << ".gseq "
-                     << existing->peer_global_seq << " > "
+                     << exproto->peer_global_seq << " > "
                      << connect_msg.global_seq << ", RETRY_GLOBAL" << dendl;
       connect_reply.global_seq =
-          existing->peer_global_seq;  // so we can send it below..
+          exproto->peer_global_seq;  // so we can send it below..
       existing->lock.unlock();
       send_connect_message_reply(CEPH_MSGR_TAG_RETRY_GLOBAL);
       ldout(cct, 20) << __func__ << " END" << dendl;
       return;
     } else {
       ldout(cct, 10) << __func__ << " accept existing " << existing << ".gseq "
-                     << existing->peer_global_seq
+                     << exproto->peer_global_seq
                      << " <= " << connect_msg.global_seq << ", looks ok"
                      << dendl;
     }
@@ -1470,112 +1801,119 @@ void ServerProtocolV1::handle_connect_message_2() {
           << __func__
           << " accept replacing existing (lossy) channel (new one lossy="
           << connection->policy.lossy << ")" << dendl;
-      existing->was_session_reset();
+      exproto->session_reset();
       ldout(cct, 20) << __func__ << " END" << dendl;
       replace();
       return;
     }
 
-    // ldout(async_msgr->cct, 1)
-    //     << __func__ << " accept connect_seq " << connect.connect_seq
-    //     << " vs existing csq=" << existing->connect_seq
-    //     << " existing_state=" << get_state_name(existing->state) << dendl;
+    ldout(cct, 1) << __func__ << " accept connect_seq "
+                  << connect_msg.connect_seq
+                  << " vs existing csq=" << exproto->connect_seq
+                  << " existing_state="
+                  << connection->get_state_name(existing->state) << dendl;
 
-    // if (connect.connect_seq == 0 && existing->connect_seq > 0) {
-    //   ldout(async_msgr->cct, 0)
-    //       << __func__
-    //       << " accept peer reset, then tried to connect to us, replacing"
-    //       << dendl;
-    //   // this is a hard reset from peer
-    //   is_reset_from_peer = true;
-    //   if (policy.resetcheck)
-    //     existing->was_session_reset();  // this resets out_queue, msg_ and
-    //                                     // connect_seq #'s
-    //   goto replace;
-    // }
+    if (connect_msg.connect_seq == 0 && exproto->connect_seq > 0) {
+      ldout(cct, 0)
+          << __func__
+          << " accept peer reset, then tried to connect to us, replacing"
+          << dendl;
+      // this is a hard reset from peer
+      is_reset_from_peer = true;
+      if (connection->policy.resetcheck) {
+        exproto->session_reset();  // this resets out_queue, msg_ and
+                                   // connect_seq #'s
+      }
+      ldout(cct, 20) << __func__ << " END" << dendl;
+      replace();
+      return;
+    }
 
-    // if (connect.connect_seq < existing->connect_seq) {
-    //   // old attempt, or we sent READY but they didn't get it.
-    //   ldout(async_msgr->cct, 10)
-    //       << __func__ << " accept existing " << existing << ".cseq "
-    //       << existing->connect_seq << " > " << connect.connect_seq
-    //       << ", RETRY_SESSION" << dendl;
-    //   reply.connect_seq = existing->connect_seq + 1;
-    //   existing->lock.unlock();
-    //   return _reply_accept(CEPH_MSGR_TAG_RETRY_SESSION, connect, reply,
-    //                        authorizer_reply);
-    // }
+    if (connect_msg.connect_seq < exproto->connect_seq) {
+      // old attempt, or we sent READY but they didn't get it.
+      ldout(cct, 10) << __func__ << " accept existing " << existing << ".cseq "
+                     << exproto->connect_seq << " > " << connect_msg.connect_seq
+                     << ", RETRY_SESSION" << dendl;
+      connect_reply.connect_seq = exproto->connect_seq + 1;
+      existing->lock.unlock();
+      send_connect_message_reply(CEPH_MSGR_TAG_RETRY_SESSION);
+      ldout(cct, 20) << __func__ << " END" << dendl;
+      return;
+    }
 
-    // if (connect.connect_seq == existing->connect_seq) {
-    //   // if the existing connection successfully opened, and/or
-    //   // subsequently went to standby, then the peer should bump
-    //   // their connect_seq and retry: this is not a connection race
-    //   // we need to resolve here.
-    //   if (existing->state == STATE_OPEN || existing->state ==
-    //   STATE_STANDBY) {
-    //     ldout(async_msgr->cct, 10)
-    //         << __func__ << " accept connection race, existing " << existing
-    //         << ".cseq " << existing->connect_seq
-    //         << " == " << connect.connect_seq << ", OPEN|STANDBY,
-    //         RETRY_SESSION"
-    //         << dendl;
-    //     // if connect_seq both zero, dont stuck into dead lock. it's ok to
-    //     // replace
-    //     if (policy.resetcheck && existing->connect_seq == 0) {
-    //       goto replace;
-    //     }
+    if (connect_msg.connect_seq == exproto->connect_seq) {
+      // if the existing connection successfully opened, and/or
+      // subsequently went to standby, then the peer should bump
+      // their connect_seq and retry: this is not a connection race
+      // we need to resolve here.
+      if (existing->state == AsyncConnection::STATE_OPEN ||
+          existing->state == AsyncConnection::STATE_STANDBY) {
+        ldout(cct, 10) << __func__ << " accept connection race, existing "
+                       << existing << ".cseq " << exproto->connect_seq
+                       << " == " << connect_msg.connect_seq
+                       << ", OPEN|STANDBY, RETRY_SESSION " << dendl;
+        // if connect_seq both zero, dont stuck into dead lock. it's ok to
+        // replace
+        if (connection->policy.resetcheck && exproto->connect_seq == 0) {
+          ldout(cct, 20) << __func__ << " END" << dendl;
+          replace();
+          return;
+        }
 
-    //     reply.connect_seq = existing->connect_seq + 1;
-    //     existing->lock.unlock();
-    //     return _reply_accept(CEPH_MSGR_TAG_RETRY_SESSION, connect, reply,
-    //                          authorizer_reply);
-    //   }
+        connect_reply.connect_seq = exproto->connect_seq + 1;
+        existing->lock.unlock();
+        send_connect_message_reply(CEPH_MSGR_TAG_RETRY_SESSION);
+        ldout(cct, 20) << __func__ << " END" << dendl;
+        return;
+      }
 
-    //   // connection race?
-    //   if (peer_addr < async_msgr->get_myaddr() || existing->policy.server)
-    //   {
-    //     // incoming wins
-    //     ldout(async_msgr->cct, 10)
-    //         << __func__ << " accept connection race, existing " << existing
-    //         << ".cseq " << existing->connect_seq
-    //         << " == " << connect.connect_seq
-    //         << ", or we are server, replacing my attempt" << dendl;
-    //     goto replace;
-    //   } else {
-    //     // our existing outgoing wins
-    //     ldout(async_msgr->cct, 10)
-    //         << __func__ << " accept connection race, existing " << existing
-    //         << ".cseq " << existing->connect_seq
-    //         << " == " << connect.connect_seq << ", sending WAIT" << dendl;
-    //     assert(peer_addr > async_msgr->get_myaddr());
-    //     existing->lock.unlock();
-    //     return _reply_accept(CEPH_MSGR_TAG_WAIT, connect, reply,
-    //                          authorizer_reply);
-    //   }
+      // connection race?
+      if (connection->peer_addr < messenger->get_myaddr() ||
+          existing->policy.server) {
+        // incoming wins
+        ldout(cct, 10) << __func__ << " accept connection race, existing "
+                       << existing << ".cseq " << exproto->connect_seq
+                       << " == " << connect_msg.connect_seq
+                       << ", or we are server, replacing my attempt" << dendl;
+        ldout(cct, 20) << __func__ << " END" << dendl;
+        replace();
+        return;
+      } else {
+        // our existing outgoing wins
+        ldout(messenger->cct, 10)
+            << __func__ << " accept connection race, existing " << existing
+            << ".cseq " << exproto->connect_seq
+            << " == " << connect_msg.connect_seq << ", sending WAIT" << dendl;
+        assert(connection->peer_addr > messenger->get_myaddr());
+        existing->lock.unlock();
+        send_connect_message_reply(CEPH_MSGR_TAG_WAIT);
+        ldout(cct, 20) << __func__ << " END" << dendl;
+        return;
+      }
+    }
 
-    // assert(connect.connect_seq > existing->connect_seq);
-    // assert(connect.global_seq >= existing->peer_global_seq);
-    // if (policy.resetcheck &&  // RESETSESSION only used by servers; peers
-    // do not
-    //                           // reset each other
-    //     existing->connect_seq == 0) {
-    //   ldout(async_msgr->cct, 0)
-    //       << __func__ << " accept we reset (peer sent cseq "
-    //       << connect.connect_seq << ", " << existing
-    //       << ".cseq = " << existing->connect_seq << "), sending
-    //       RESETSESSION"
-    //       << dendl;
-    //   existing->lock.unlock();
-    //   return _reply_accept(CEPH_MSGR_TAG_RESETSESSION, connect, reply,
-    //                        authorizer_reply);
-    // }
+    assert(connect_msg.connect_seq > exproto->connect_seq);
+    assert(connect_msg.global_seq >= exproto->peer_global_seq);
+    if (connection->policy.resetcheck &&  // RESETSESSION only used by servers;
+                                          // peers do not reset each other
+        exproto->connect_seq == 0) {
+      ldout(cct, 0) << __func__ << " accept we reset (peer sent cseq "
+                    << connect_msg.connect_seq << ", " << existing
+                    << ".cseq = " << exproto->connect_seq
+                    << "), sending RESETSESSION " << dendl;
+      existing->lock.unlock();
+      send_connect_message_reply(CEPH_MSGR_TAG_RESETSESSION);
+      ldout(cct, 20) << __func__ << " END" << dendl;
+      return;
+    }
 
-    // // reconnect
-    // ldout(async_msgr->cct, 10)
-    //     << __func__ << " accept peer sent cseq " << connect.connect_seq <<
-    //     " > "
-    //     << existing->connect_seq << dendl;
-    // goto replace;
+    // reconnect
+    ldout(cct, 10) << __func__ << " accept peer sent cseq "
+                   << connect_msg.connect_seq << " > " << exproto->connect_seq
+                   << dendl;
+    ldout(cct, 20) << __func__ << " END" << dendl;
+    replace();
+    return;
   }  // existing
   else if (!connection->replacing && connect_msg.connect_seq > 0) {
     // we reset, and they are opening a new session
@@ -1593,238 +1931,6 @@ void ServerProtocolV1::handle_connect_message_2() {
     open();
     return;
   }
-
-  // replace:
-  //   ldout(async_msgr->cct, 10)
-  //       << __func__ << " accept replacing " << existing << dendl;
-
-  //   inject_delay();
-  //   if (existing->policy.lossy) {
-  //     // disconnect from the Connection
-  //     ldout(async_msgr->cct, 1)
-  //         << __func__ << " replacing on lossy channel, failing existing" <<
-  //         dendl;
-  //     existing->_stop();
-  //     existing->dispatch_queue->queue_reset(existing.get());
-  //   } else {
-  //     assert(can_write == WriteStatus::NOWRITE);
-  //     existing->write_lock.lock();
-
-  //     // reset the in_seq if this is a hard reset from peer,
-  //     // otherwise we respect our original connection's value
-  //     if (is_reset_from_peer) {
-  //       existing->is_reset_from_peer = true;
-  //     }
-
-  //     center->delete_file_event(cs.fd(), EVENT_READABLE | EVENT_WRITABLE);
-
-  //     if (existing->delay_state) {
-  //       existing->delay_state->flush();
-  //       assert(!delay_state);
-  //     }
-  //     existing->reset_recv_state();
-
-  //     auto temp_cs = std::move(cs);
-  //     EventCenter *new_center = center;
-  //     Worker *new_worker = worker;
-  //     // avoid _stop shutdown replacing socket
-  //     // queue a reset on the new connection, which we're dumping for the
-  //     old _stop();
-
-  //     dispatch_queue->queue_reset(this);
-  //     ldout(async_msgr->cct, 1)
-  //         << __func__ << " stop myself to swap existing" << dendl;
-  //     existing->can_write = WriteStatus::REPLACING;
-  //     existing->replacing = true;
-  //     existing->state_offset = 0;
-  //     // avoid previous thread modify event
-  //     existing->state = STATE_NONE;
-  //     // Discard existing prefetch buffer in `recv_buf`
-  //     existing->recv_start = existing->recv_end = 0;
-  //     // there shouldn't exist any buffer
-  //     assert(recv_start == recv_end);
-
-  //     auto deactivate_existing = std::bind(
-  //         [existing, new_worker, new_center, connect, reply,
-  //          authorizer_reply](ConnectedSocket &cs) mutable {
-  //           // we need to delete time event in original thread
-  //           {
-  //             std::lock_guard<std::mutex> l(existing->lock);
-  //             existing->write_lock.lock();
-  //             existing->requeue_sent();
-  //             existing->outcoming_bl.clear();
-  //             existing->open_write = false;
-  //             existing->write_lock.unlock();
-  //             if (existing->state == STATE_NONE) {
-  //               existing->shutdown_socket();
-  //               existing->cs = std::move(cs);
-  //               existing->worker->references--;
-  //               new_worker->references++;
-  //               existing->logger = new_worker->get_perf_counter();
-  //               existing->worker = new_worker;
-  //               existing->center = new_center;
-  //               if (existing->delay_state)
-  //                 existing->delay_state->set_center(new_center);
-  //             } else if (existing->state == STATE_CLOSED) {
-  //               auto back_to_close =
-  //                   std::bind([](ConnectedSocket &cs) mutable { cs.close();
-  //                   },
-  //                             std::move(cs));
-  //               new_center->submit_to(new_center->get_id(),
-  //                                     std::move(back_to_close), true);
-  //               return;
-  //             } else {
-  //               ceph_abort();
-  //             }
-  //           }
-
-  //           // Before changing existing->center, it may already exists some
-  //           events
-  //           // in existing->center's queue. Then if we mark down
-  //           `existing`, it
-  //           // will execute in another thread and clean up connection.
-  //           Previous
-  //           // event will result in segment fault
-  //           auto transfer_existing = [existing, connect, reply,
-  //                                     authorizer_reply]() mutable {
-  //             std::lock_guard<std::mutex> l(existing->lock);
-  //             if (existing->state == STATE_CLOSED) return;
-  //             assert(existing->state == STATE_NONE);
-
-  //             existing->state = STATE_ACCEPTING_WAIT_CONNECT_MSG;
-  //             existing->center->create_file_event(
-  //                 existing->cs.fd(), EVENT_READABLE,
-  //                 existing->read_handler);
-  //             reply.global_seq = existing->peer_global_seq;
-  //             if (existing->_reply_accept(CEPH_MSGR_TAG_RETRY_GLOBAL,
-  //             connect,
-  //                                         reply, authorizer_reply) < 0) {
-  //               // handle error
-  //               existing->fault();
-  //             }
-  //           };
-  //           if (existing->center->in_thread())
-  //             transfer_existing();
-  //           else
-  //             existing->center->submit_to(existing->center->get_id(),
-  //                                         std::move(transfer_existing),
-  //                                         true);
-  //         },
-  //         std::move(temp_cs));
-
-  //     existing->center->submit_to(existing->center->get_id(),
-  //                                 std::move(deactivate_existing), true);
-  //     existing->write_lock.unlock();
-  //     existing->lock.unlock();
-  //     return 0;
-  //   }
-  //   existing->lock.unlock();
-
-  // open:
-  //   connect_seq = connect.connect_seq + 1;
-  //   peer_global_seq = connect.global_seq;
-  //   ldout(async_msgr->cct, 10)
-  //       << __func__ << " accept success, connect_seq = " << connect_seq
-  //       << " in_seq=" << in_seq << ", sending READY" << dendl;
-
-  //   int next_state;
-
-  //   // if it is a hard reset from peer, we don't need a round-trip to
-  //   negotiate
-  //   // in/out sequence
-  //   if ((connect.features & CEPH_FEATURE_RECONNECT_SEQ) &&
-  //   !is_reset_from_peer) {
-  //     reply.tag = CEPH_MSGR_TAG_SEQ;
-  //     next_state = STATE_ACCEPTING_WAIT_SEQ;
-  //   } else {
-  //     reply.tag = CEPH_MSGR_TAG_READY;
-  //     next_state = STATE_ACCEPTING_READY;
-  //     discard_requeued_up_to(0);
-  //     is_reset_from_peer = false;
-  //     in_seq = 0;
-  //   }
-
-  //   // send READY reply
-  //   reply.features = policy.features_supported;
-  //   reply.global_seq = async_msgr->get_global_seq();
-  //   reply.connect_seq = connect_seq;
-  //   reply.flags = 0;
-  //   reply.authorizer_len = authorizer_reply.length();
-  //   if (policy.lossy) reply.flags = reply.flags | CEPH_MSG_CONNECT_LOSSY;
-
-  //   set_features((uint64_t)reply.features & (uint64_t)connect.features);
-  //   ldout(async_msgr->cct, 10)
-  //       << __func__ << " accept features " << get_features() << dendl;
-
-  //   session_security.reset(get_auth_session_handler(async_msgr->cct,
-  //                                                   connect.authorizer_protocol,
-  //                                                   session_key,
-  //                                                   get_features()));
-
-  //   reply_bl.append((char *)&reply, sizeof(reply));
-
-  //   if (reply.authorizer_len)
-  //     reply_bl.append(authorizer_reply.c_str(), authorizer_reply.length());
-
-  //   if (reply.tag == CEPH_MSGR_TAG_SEQ) {
-  //     uint64_t s = in_seq;
-  //     reply_bl.append((char *)&s, sizeof(s));
-  //   }
-
-  //   lock.unlock();
-  //   // Because "replacing" will prevent other connections preempt this
-  //   addr,
-  //   // it's safe that here we don't acquire Connection's lock
-  //   r = async_msgr->accept_conn(this);
-
-  //   inject_delay();
-
-  //   lock.lock();
-  //   replacing = false;
-  //   if (r < 0) {
-  //     ldout(async_msgr->cct, 1)
-  //         << __func__ << " existing race replacing process for addr=" <<
-  //         peer_addr
-  //         << " just fail later one(this)" << dendl;
-  //     goto fail_registered;
-  //   }
-  //   if (state != STATE_ACCEPTING_WAIT_CONNECT_MSG_AUTH) {
-  //     ldout(async_msgr->cct, 1)
-  //         << __func__ << " state changed while accept_conn, it must be
-  //         mark_down"
-  //         << dendl;
-  //     assert(state == STATE_CLOSED || state == STATE_NONE);
-  //     goto fail_registered;
-  //   }
-
-  //   r = try_send(reply_bl);
-  //   if (r < 0) goto fail_registered;
-
-  //   // notify
-  //   dispatch_queue->queue_accept(this);
-  //   async_msgr->ms_deliver_handle_fast_accept(this);
-  //   once_ready = true;
-
-  //   if (r == 0) {
-  //     state = next_state;
-  //     ldout(async_msgr->cct, 2)
-  //         << __func__ << " accept write reply msg done" << dendl;
-  //   } else {
-  //     state = STATE_WAIT_SEND;
-  //     state_after_send = next_state;
-  //   }
-
-  //   return 0;
-
-  // fail_registered:
-  //   ldout(async_msgr->cct, 10)
-  //       << __func__ << " accept fault after register" << dendl;
-  //   inject_delay();
-
-  // fail:
-  //   ldout(async_msgr->cct, 10) << __func__ << " failed to accept." <<
-  //   dendl; return -1;
-  // }
 
   ldout(cct, 20) << __func__ << " END" << dendl;
 }
@@ -1850,6 +1956,7 @@ void ServerProtocolV1::send_connect_message_reply(char tag) {
 
 void ServerProtocolV1::handle_connect_message_reply_write(int r) {
   ldout(cct, 20) << __func__ << " BEGIN" << dendl;
+
   if (r < 0) {
     connection->inject_delay();
     handle_failure(r);
@@ -1880,8 +1987,10 @@ void ServerProtocolV1::replace() {
 
     // reset the in_seq if this is a hard reset from peer,
     // otherwise we respect our original connection's value
+    ServerProtocolV1 *exproto =
+        dynamic_cast<ServerProtocolV1 *>(existing->protocol.get());
     if (is_reset_from_peer) {
-      existing->is_reset_from_peer = true;
+      exproto->is_reset_from_peer = true;
     }
 
     connection->center->delete_file_event(connection->cs.fd(),
@@ -1914,7 +2023,7 @@ void ServerProtocolV1::replace() {
     assert(connection->recv_start == connection->recv_end);
 
     auto deactivate_existing = std::bind(
-        [this, new_worker, new_center](ConnectedSocket &cs) mutable {
+        [this, new_worker, new_center, exproto](ConnectedSocket &cs) mutable {
           // we need to delete time event in original thread
           {
             std::lock_guard<std::mutex> l(existing->lock);
@@ -1949,17 +2058,17 @@ void ServerProtocolV1::replace() {
           // events in existing->center's queue. Then if we mark down
           // `existing`, it will execute in another thread and clean up
           // connection. Previous event will result in segment fault
-          auto transfer_existing = [this]() mutable {
+          auto transfer_existing = [this, exproto]() mutable {
             std::lock_guard<std::mutex> l(existing->lock);
             if (existing->state == AsyncConnection::STATE_CLOSED) return;
             assert(existing->state == AsyncConnection::STATE_NONE);
 
             existing->state = AsyncConnection::STATE_ACCEPTING_WAIT_CONNECT_MSG;
+            exproto->state = INITIATING;
             existing->center->create_file_event(
                 existing->cs.fd(), EVENT_READABLE, existing->read_handler);
-            connect_reply.global_seq = existing->peer_global_seq;
-            // existing->serverProtocol->send_connect_message_reply(
-            //    CEPH_MSGR_TAG_RETRY_GLOBAL);
+            connect_reply.global_seq = exproto->peer_global_seq;
+            exproto->send_connect_message_reply(CEPH_MSGR_TAG_RETRY_GLOBAL);
           };
           if (existing->center->in_thread())
             transfer_existing();
@@ -1999,7 +2108,7 @@ void ServerProtocolV1::open() {
   } else {
     connect_reply.tag = CEPH_MSGR_TAG_READY;
     wait_for_seq = false;
-    connection->discard_requeued_up_to(0);
+    out_seq = connection->discard_requeued_up_to(out_seq, 0);
     is_reset_from_peer = false;
     in_seq = 0;
   }
@@ -2043,21 +2152,26 @@ void ServerProtocolV1::open() {
 
   connection->lock.lock();
   bool replacing = false;
-  // if (r < 0) {
-  //   ldout(cct, 1) << __func__ << " existing race replacing process for
-  //   addr="
-  //                 << connection->peer_addr << " just fail later one(this)"
-  //                 << dendl;
-  //   goto fail_registered;
-  // }
-  // if (connection->state != STATE_ACCEPTING_WAIT_CONNECT_MSG_AUTH) {
-  //   ldout(async_msgr->cct, 1)
-  //       << __func__ << " state changed while accept_conn, it must be
-  //       mark_down"
-  //       << dendl;
-  //   assert(state == STATE_CLOSED || state == STATE_NONE);
-  //   goto fail_registered;
-  // }
+  if (r < 0) {
+    ldout(cct, 1) << __func__ << " existing race replacing process for addr = "
+                  << connection->peer_addr << " just fail later one(this)"
+                  << dendl;
+    ldout(cct, 10) << "accept fault after register" << dendl;
+    connection->inject_delay();
+    handle_failure();
+    return;
+  }
+  if (state != INITIATING) {
+    ldout(cct, 1) << __func__
+                  << " state changed while accept_conn, it must be mark_down"
+                  << dendl;
+    assert(connection->state == AsyncConnection::STATE_CLOSED ||
+           connection->state == AsyncConnection::STATE_NONE);
+    ldout(cct, 10) << "accept fault after register" << dendl;
+    connection->inject_delay();
+    handle_failure();
+    return;
+  }
 
   WRITE(reply_bl, &ServerProtocolV1::handle_ready_connect_message_reply_write);
 
@@ -2066,6 +2180,7 @@ void ServerProtocolV1::open() {
 
 void ServerProtocolV1::handle_ready_connect_message_reply_write(int r) {
   ldout(cct, 20) << __func__ << " BEGIN" << dendl;
+
   if (r < 0) {
     handle_failure(r);
     ldout(cct, 20) << __func__ << " END" << dendl;
@@ -2107,7 +2222,7 @@ void ServerProtocolV1::handle_seq(char *buffer, int r) {
   uint64_t newly_acked_seq = *(uint64_t *)buffer;
   ldout(cct, 2) << __func__ << " accept get newly_acked_seq " << newly_acked_seq
                 << dendl;
-  connection->discard_requeued_up_to(newly_acked_seq);
+  out_seq = connection->discard_requeued_up_to(out_seq, newly_acked_seq);
 
   ldout(cct, 20) << __func__ << " END" << dendl;
 

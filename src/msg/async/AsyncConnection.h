@@ -74,8 +74,8 @@ class AsyncConnection : public Connection {
   void was_session_reset();
   void fault();
   void discard_out_queue();
-  void discard_requeued_up_to(uint64_t seq);
-  void requeue_sent();
+  uint64_t discard_requeued_up_to(uint64_t out_seq, uint64_t seq);
+  uint64_t requeue_sent();
   void randomize_out_seq();
   void handle_ack(uint64_t seq);
   void _append_keepalive_or_ack(bool ack=false, utime_t *t=NULL);
@@ -281,10 +281,10 @@ class AsyncConnection : public Connection {
   AsyncMessenger *async_msgr;
   uint64_t conn_id;
   PerfCounters *logger;
-  int global_seq;
-  __u32 connect_seq, peer_global_seq;
-  std::atomic<uint64_t> out_seq{0};
-  std::atomic<uint64_t> ack_left{0}, in_seq{0};
+  // int global_seq;
+  // __u32 connect_seq, peer_global_seq;
+  // std::atomic<uint64_t> out_seq{0};
+  // std::atomic<uint64_t> ack_left{0}, in_seq{0};
   int state;
   int state_after_send;
   ConnectedSocket cs;
