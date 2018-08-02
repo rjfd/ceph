@@ -47,7 +47,7 @@
       "type": "cppdbg",
       "request": "launch",
       "program": "/home/rdias/Work/ceph-msgr/build/bin/ceph_test_msgr",
-      "args": ["--debug-ms=30"],
+      "args": ["--debug-ms=30", "--gtest_filter='*SyntheticStressTest*'"],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
       "environment": [],
