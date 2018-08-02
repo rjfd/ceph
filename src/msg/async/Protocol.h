@@ -1,6 +1,9 @@
 #ifndef _MSG_ASYNC_PROTOCOL_
 #define _MSG_ASYNC_PROTOCOL_
 
+#include <list>
+#include <map>
+
 #include "AsyncConnection.h"
 #include "include/buffer.h"
 #include "include/msgr.h"
@@ -24,11 +27,24 @@ public:
   virtual void send_message(Message *m) = 0;
   virtual void write_event() = 0;
   virtual void fault() = 0;
+  virtual bool has_queued_writes() = 0;
+  virtual bool is_connected() = 0;
+  virtual bool writes_allowed() = 0;
+  virtual void send_keepalive() = 0;
 };
 
 class ProtocolV1 : public Protocol {
 protected:
   enum State { NOT_INITIATED, INITIATING, OPENED, CLOSED };
+
+  char *temp_buffer;
+
+  enum class WriteStatus { NOWRITE, REPLACING, CANWRITE, CLOSED };
+  std::atomic<WriteStatus> can_write;
+  std::list<Message *> sent;  // the first bufferlist need to inject seq
+  // priority queue for outbound msgs
+  std::map<int, std::list<std::pair<bufferlist, Message *>>> out_q;
+  bool keepalive;
 
   __u32 connect_seq, peer_global_seq;
   std::atomic<uint64_t> in_seq{0};
@@ -48,6 +64,15 @@ protected:
   bufferlist data_buf;
   bufferlist::iterator data_blp;
   bufferlist front, middle, data;
+
+  bool replacing;    // when replacing process happened, we will reply connect
+                     // side with RETRY tag and accept side will clear replaced
+                     // connection. So when connect side reissue connect_msg,
+                     // there won't exists conflicting connection so we use
+                     // "replacing" to skip RESETSESSION to avoid detect wrong
+                     // presentation
+  bool is_reset_from_peer;
+  bool once_ready;
 
   State state;
 
@@ -76,13 +101,21 @@ protected:
   void session_reset();
   void randomize_out_seq();
 
+  Message *_get_next_outgoing(bufferlist *bl);
+  bool _has_next_outgoing() const;
+
   void prepare_send_message(uint64_t features, Message *m, bufferlist &bl);
-  ssize_t write_message(Message *m, bufferlist& bl, bool more);
+  ssize_t write_message(Message *m, bufferlist &bl, bool more);
+
+  void requeue_sent();
+  uint64_t discard_requeued_up_to(uint64_t out_seq, uint64_t seq);
+  void discard_out_queue();
 
   ostream &_conn_prefix(std::ostream *_dout);
 
 public:
   ProtocolV1(AsyncConnection *connection);
+  virtual ~ProtocolV1();
 
   virtual void init() = 0;
   virtual void abort();
@@ -92,6 +125,19 @@ public:
   virtual void send_message(Message *m);
   virtual void write_event();
   virtual void fault();
+  virtual bool has_queued_writes();
+  virtual bool is_connected();
+  virtual bool writes_allowed();
+  virtual void send_keepalive();
+};
+
+class LoopbackProtocolV1 : public ProtocolV1 {
+public:
+  LoopbackProtocolV1(AsyncConnection *connection) : ProtocolV1(connection) {
+    this->can_write = WriteStatus::CANWRITE;
+  }
+
+  void init() override {}
 };
 
 class ClientProtocolV1 : public ProtocolV1 {

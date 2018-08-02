@@ -1,8 +1,8 @@
 #include "Protocol.h"
 
 #include "AsyncMessenger.h"
-#include "include/random.h"
 #include "common/EventTrace.h"
+#include "include/random.h"
 
 #define dout_subsys ceph_subsys_ms
 #undef dout_prefix
@@ -18,15 +18,22 @@ ostream &ProtocolV1::_conn_prefix(std::ostream *_dout) {
 #define WRITE(B, F) \
   connection->write(B, std::bind(F, this, std::placeholders::_1))
 
-#define READ(L, F)  \
-  connection->read( \
-      L, std::bind(F, this, std::placeholders::_1, std::placeholders::_2))
+#define READ(L, F)    \
+  connection->read(   \
+      L, temp_buffer, \
+      std::bind(F, this, std::placeholders::_1, std::placeholders::_2))
+
+#define READB(L, B, F) \
+  connection->read(    \
+      L, B, std::bind(F, this, std::placeholders::_1, std::placeholders::_2))
 
 // Constant to limit starting sequence number to 2^31.  Nothing special about
 // it, just a big number.  PLR
 #define SEQ_MASK 0x7fffffff
 
 const int ASYNC_COALESCE_THRESHOLD = 256;
+
+using namespace std;
 
 static void alloc_aligned_buffer(bufferlist &data, unsigned len, unsigned off) {
   // create a buffer to read into that matches the data alignment
@@ -58,12 +65,26 @@ Protocol::~Protocol() {}
 
 ProtocolV1::ProtocolV1(AsyncConnection *connection)
     : Protocol(connection),
+      temp_buffer(nullptr),
+      can_write(WriteStatus::NOWRITE),
+      keepalive(false),
       connect_seq(0),
       peer_global_seq(0),
       msg_left(0),
       cur_msg_size(0),
+      replacing(false),
+      is_reset_from_peer(false),
+      once_ready(false),
       state(NOT_INITIATED),
-      _abort(false) {}
+      _abort(false) {
+  temp_buffer = new char[4096];
+}
+
+ProtocolV1::~ProtocolV1() {
+  assert(out_q.empty());
+  assert(sent.empty());
+  delete[] temp_buffer;
+}
 
 void ProtocolV1::handle_failure(int r) {
   if (state == NOT_INITIATED || state == CLOSED) {
@@ -80,13 +101,33 @@ void ProtocolV1::handle_failure(int r) {
   }
 
   // requeue sent items
-  out_seq -= connection->requeue_sent();
+  requeue_sent();
+
+  {
+    lock_guard<mutex> wl(connection->write_lock);
+    can_write = WriteStatus::NOWRITE;
+    is_reset_from_peer = false;
+
+    if (!once_ready && out_q.empty() && state == INITIATING && !replacing) {
+      ldout(cct, 10)
+          << __func__ << " with nothing to send and in the half "
+          << " accept state just closed" << dendl;
+      connection->write_lock.unlock();
+      connection->_stop();
+      connection->dispatch_queue->queue_reset(connection);
+      return;
+    }
+
+    replacing = false;
+  }
 
   connection->fault();
 }
 
 void ProtocolV1::abort() {
   _abort = true;
+  discard_out_queue();
+  can_write = WriteStatus::CLOSED;
   state = CLOSED;
 }
 
@@ -219,10 +260,28 @@ void ProtocolV1::handle_tag_ack(char *buffer, int r) {
     return;
   }
 
-  ceph_le64 *seq;
-  seq = (ceph_le64 *)buffer;
+  ceph_le64 seq;
+  seq = *(ceph_le64 *)buffer;
   ldout(cct, 20) << __func__ << " got ACK" << dendl;
-  connection->handle_ack(*seq);
+
+  ldout(cct, 15) << __func__ << " got ack seq " << seq << dendl;
+  // trim sent list
+  static const int max_pending = 128;
+  int i = 0;
+  Message *pending[max_pending];
+  connection->write_lock.lock();
+  while (!sent.empty() && sent.front()->get_seq() <= seq && i < max_pending) {
+    Message *m = sent.front();
+    sent.pop_front();
+    pending[i++] = m;
+    ldout(cct, 10) << __func__ << " got ack seq " << seq
+                   << " >= " << m->get_seq() << " on " << m << " " << *m
+                   << dendl;
+  }
+  connection->write_lock.unlock();
+  for (int k = 0; k < i; k++) {
+    pending[k]->put();
+  }
 
   ldout(cct, 20) << __func__ << " END" << dendl;
 
@@ -355,8 +414,12 @@ void ProtocolV1::read_message_front() {
   ldout(cct, 20) << __func__ << " BEGIN" << dendl;
   ldout(cct, 20) << __func__ << " END" << dendl;
 
-  if (current_header.front_len) {
-    READ(current_header.front_len, &ProtocolV1::handle_message_front);
+  unsigned front_len = current_header.front_len;
+  if (front_len) {
+    if (!front.length()) {
+      front.push_back(buffer::create(front_len));
+    }
+    READB(front_len, front.c_str(), &ProtocolV1::handle_message_front);
   } else {
     read_message_middle();
   }
@@ -370,10 +433,6 @@ void ProtocolV1::handle_message_front(char *buffer, int r) {
     handle_failure(r);
   }
 
-  if (!front.length()) {
-    front.push_back(buffer::create(current_header.front_len));
-  }
-  memcpy(front.c_str(), buffer, current_header.front_len);
   ldout(cct, 20) << __func__ << " got front " << front.length() << dendl;
 
   ldout(cct, 20) << __func__ << " END" << dendl;
@@ -386,7 +445,11 @@ void ProtocolV1::read_message_middle() {
   ldout(cct, 20) << __func__ << " END" << dendl;
 
   if (current_header.middle_len) {
-    READ(current_header.middle_len, &ProtocolV1::handle_message_middle);
+    if (!middle.length()) {
+      middle.push_back(buffer::create(current_header.middle_len));
+    }
+    READB(current_header.middle_len, middle.c_str(),
+          &ProtocolV1::handle_message_middle);
   } else {
     read_message_data_prepare();
   }
@@ -400,10 +463,6 @@ void ProtocolV1::handle_message_middle(char *buffer, int r) {
     handle_failure(r);
   }
 
-  if (!middle.length()) {
-    middle.push_back(buffer::create(current_header.middle_len));
-  }
-  memcpy(middle.c_str(), buffer, current_header.middle_len);
   ldout(cct, 20) << __func__ << " got middle " << middle.length() << dendl;
 
   ldout(cct, 20) << __func__ << " END" << dendl;
@@ -453,7 +512,7 @@ void ProtocolV1::read_message_data() {
     bufferptr bp = data_blp.get_current_ptr();
     unsigned read_len = std::min(bp.length(), msg_left);
 
-    READ(read_len, &ProtocolV1::handle_message_data);
+    READB(read_len, bp.c_str(), &ProtocolV1::handle_message_data);
   } else {
     read_message_footer();
   }
@@ -470,8 +529,6 @@ void ProtocolV1::handle_message_data(char *buffer, int r) {
 
   bufferptr bp = data_blp.get_current_ptr();
   unsigned read_len = std::min(bp.length(), msg_left);
-  memcpy(bp.c_str(), buffer, read_len);
-
   data_blp.advance(read_len);
   data.append(bp, 0, read_len);
   msg_left -= read_len;
@@ -668,7 +725,7 @@ void ProtocolV1::session_reset() {
   if (connection->delay_state) connection->delay_state->discard();
 
   connection->dispatch_queue->discard_queue(connection->conn_id);
-  connection->discard_out_queue();
+  discard_out_queue();
   // note: we need to clear outcoming_bl here, but session_reset may be
   // called by other thread, so let caller clear this itself!
   // outcoming_bl.clear();
@@ -681,8 +738,8 @@ void ProtocolV1::session_reset() {
   connect_seq = 0;
   // it's safe to directly set 0, double locked
   ack_left = 0;
-  connection->once_ready = false;
-  connection->can_write = AsyncConnection::WriteStatus::NOWRITE;
+  once_ready = false;
+  can_write = WriteStatus::NOWRITE;
 }
 
 void ProtocolV1::randomize_out_seq() {
@@ -732,24 +789,23 @@ void ProtocolV1::send_message(Message *m) {
   std::lock_guard<std::mutex> l(connection->write_lock);
   // "features" changes will change the payload encoding
   if (can_fast_prepare &&
-      (connection->can_write == AsyncConnection::WriteStatus::NOWRITE ||
-       connection->get_features() != f)) {
+      (can_write == WriteStatus::NOWRITE || connection->get_features() != f)) {
     // ensure the correctness of message encoding
     bl.clear();
     m->get_payload().clear();
     ldout(cct, 5) << __func__ << " clear encoded buffer previous " << f
                   << " != " << connection->get_features() << dendl;
   }
-  if (connection->can_write == AsyncConnection::WriteStatus::CLOSED) {
+  if (can_write == WriteStatus::CLOSED) {
     ldout(cct, 10) << __func__ << " connection closed."
                    << " Drop message " << m << dendl;
     m->put();
   } else {
     m->trace.event("async enqueueing message");
-    connection->out_q[m->get_priority()].emplace_back(std::move(bl), m);
+    out_q[m->get_priority()].emplace_back(std::move(bl), m);
     ldout(cct, 15) << __func__ << " inline write is denied, reschedule m=" << m
                    << dendl;
-    if (connection->can_write != AsyncConnection::WriteStatus::REPLACING) {
+    if (can_write != WriteStatus::REPLACING) {
       connection->center->dispatch_event_external(connection->write_handler);
     }
   }
@@ -843,32 +899,111 @@ ssize_t ProtocolV1::write_message(Message *m, bufferlist &bl, bool more) {
   return rc;
 }
 
+void ProtocolV1::requeue_sent() {
+  if (sent.empty()) {
+    return;
+  }
+
+  list<pair<bufferlist, Message *> > &rq = out_q[CEPH_MSG_PRIO_HIGHEST];
+  out_seq -= sent.size();
+  while (!sent.empty()) {
+    Message *m = sent.back();
+    sent.pop_back();
+    ldout(cct, 10) << __func__ << " " << *m << " for resend "
+                   << " (" << m->get_seq() << ")" << dendl;
+    rq.push_front(make_pair(bufferlist(), m));
+  }
+}
+
+uint64_t ProtocolV1::discard_requeued_up_to(uint64_t out_seq, uint64_t seq) {
+  ldout(cct, 10) << __func__ << " " << seq << dendl;
+  std::lock_guard<std::mutex> l(connection->write_lock);
+  if (out_q.count(CEPH_MSG_PRIO_HIGHEST) == 0) {
+    return seq;
+  }
+  list<pair<bufferlist, Message *> > &rq = out_q[CEPH_MSG_PRIO_HIGHEST];
+  uint64_t count = out_seq;
+  while (!rq.empty()) {
+    pair<bufferlist, Message *> p = rq.front();
+    if (p.second->get_seq() == 0 || p.second->get_seq() > seq) break;
+    ldout(cct, 10) << __func__ << " " << *(p.second) << " for resend seq "
+                   << p.second->get_seq() << " <= " << seq << ", discarding"
+                   << dendl;
+    p.second->put();
+    rq.pop_front();
+    count++;
+  }
+  if (rq.empty()) out_q.erase(CEPH_MSG_PRIO_HIGHEST);
+  return count;
+}
+
+/*
+ * Tears down the message queues, and removes them from the
+ * DispatchQueue Must hold write_lock prior to calling.
+ */
+void ProtocolV1::discard_out_queue() {
+  ldout(cct, 10) << __func__ << " started" << dendl;
+
+  for (list<Message *>::iterator p = sent.begin(); p != sent.end(); ++p) {
+    ldout(cct, 20) << __func__ << " discard " << *p << dendl;
+    (*p)->put();
+  }
+  sent.clear();
+  for (map<int, list<pair<bufferlist, Message *> > >::iterator p =
+           out_q.begin();
+       p != out_q.end(); ++p) {
+    for (list<pair<bufferlist, Message *> >::iterator r = p->second.begin();
+         r != p->second.end(); ++r) {
+      ldout(cct, 20) << __func__ << " discard " << r->second << dendl;
+      r->second->put();
+    }
+  }
+  out_q.clear();
+}
+
+Message *ProtocolV1::_get_next_outgoing(bufferlist *bl) {
+  Message *m = 0;
+  if (!out_q.empty()) {
+    map<int, list<pair<bufferlist, Message *> > >::reverse_iterator it =
+        out_q.rbegin();
+    assert(!it->second.empty());
+    list<pair<bufferlist, Message *> >::iterator p = it->second.begin();
+    m = p->second;
+    if (bl) bl->swap(p->first);
+    it->second.erase(p);
+    if (it->second.empty()) out_q.erase(it->first);
+  }
+  return m;
+}
+
+bool ProtocolV1::_has_next_outgoing() const { return !out_q.empty(); }
+
 void ProtocolV1::write_event() {
   ldout(cct, 10) << __func__ << dendl;
   ssize_t r = 0;
 
   connection->write_lock.lock();
-  if (connection->can_write == AsyncConnection::WriteStatus::CANWRITE) {
-    if (connection->keepalive) {
+  if (can_write == WriteStatus::CANWRITE) {
+    if (keepalive) {
       connection->_append_keepalive_or_ack();
-      connection->keepalive = false;
+      keepalive = false;
     }
 
     auto start = ceph::mono_clock::now();
     bool more;
     do {
       bufferlist data;
-      Message *m = connection->_get_next_outgoing(&data);
+      Message *m = _get_next_outgoing(&data);
       if (!m) {
         break;
       }
 
       if (!connection->policy.lossy) {
         // put on sent list
-        connection->sent.push_back(m);
+        sent.push_back(m);
         m->get();
       }
-      more = connection->_has_next_outgoing();
+      more = _has_next_outgoing();
       connection->write_lock.unlock();
 
       // send_message or requeue messages may not encode message
@@ -886,7 +1021,7 @@ void ProtocolV1::write_event() {
         break;
       } else if (r > 0)
         break;
-    } while (connection->can_write == AsyncConnection::WriteStatus::CANWRITE);
+    } while (can_write == WriteStatus::CANWRITE);
     connection->write_lock.unlock();
 
     // if r > 0 mean data still lefted, so no need _try_send.
@@ -909,7 +1044,8 @@ void ProtocolV1::write_event() {
     }
     connection->lock.unlock();
 
-    connection->logger->tinc(l_msgr_running_send_time, ceph::mono_clock::now() - start);
+    connection->logger->tinc(l_msgr_running_send_time,
+                             ceph::mono_clock::now() - start);
     if (r < 0) {
       ldout(cct, 1) << __func__ << " send msg failed" << dendl;
       connection->lock.lock();
@@ -924,6 +1060,7 @@ void ProtocolV1::write_event() {
     if (connection->state == AsyncConnection::STATE_STANDBY &&
         !connection->policy.server && connection->is_queued()) {
       ldout(cct, 10) << __func__ << " policy.server is false" << dendl;
+      state = NOT_INITIATED;
       connection->_connect();
     } else if (connection->cs &&
                connection->state != AsyncConnection::STATE_NONE &&
@@ -944,8 +1081,25 @@ void ProtocolV1::write_event() {
   }
 }
 
-void ProtocolV1::fault() {
-  handle_failure();
+void ProtocolV1::fault() { handle_failure(); }
+
+bool ProtocolV1::has_queued_writes() { return !out_q.empty(); }
+
+bool ProtocolV1::is_connected() {
+  return can_write.load() == WriteStatus::CANWRITE;
+}
+
+bool ProtocolV1::writes_allowed() {
+  return can_write.load() != WriteStatus::CLOSED;
+}
+
+void ProtocolV1::send_keepalive() {
+  ldout(cct, 10) << __func__ << dendl;
+  std::lock_guard<std::mutex> l(connection->write_lock);
+  if (can_write != WriteStatus::CLOSED) {
+    keepalive = true;
+    connection->center->dispatch_event_external(connection->write_handler);
+  }
 }
 
 /**
@@ -1178,8 +1332,7 @@ void ClientProtocolV1::handle_connect_message_write(int r) {
 void ClientProtocolV1::wait_connect_reply() {
   ldout(cct, 20) << __func__ << " BEGIN" << dendl;
 
-  READ(sizeof(connection->connect_reply),
-       &ClientProtocolV1::handle_connect_reply_1);
+  READ(sizeof(connect_reply), &ClientProtocolV1::handle_connect_reply_1);
 
   ldout(cct, 20) << __func__ << " END" << dendl;
 }
@@ -1390,7 +1543,7 @@ void ClientProtocolV1::handle_ack_seq(char *buffer, int r) {
   newly_acked_seq = *((uint64_t *)buffer);
   ldout(cct, 2) << __func__ << " got newly_acked_seq " << newly_acked_seq
                 << " vs out_seq " << out_seq << dendl;
-  out_seq = connection->discard_requeued_up_to(out_seq, newly_acked_seq);
+  out_seq = discard_requeued_up_to(out_seq, newly_acked_seq);
 
   bufferlist bl;
   uint64_t s = in_seq;
@@ -1423,11 +1576,10 @@ void ClientProtocolV1::ready() {
 
   // hooray!
   peer_global_seq = connect_reply.global_seq;
-  connection->policy.lossy =
-      connection->connect_reply.flags & CEPH_MSG_CONNECT_LOSSY;
+  connection->policy.lossy = connect_reply.flags & CEPH_MSG_CONNECT_LOSSY;
   connection->state = AsyncConnection::STATE_OPEN;
 
-  connection->once_ready = true;
+  once_ready = true;
   connect_seq += 1;
   assert(connect_seq == connect_reply.connect_seq);
   connection->backoff = utime_t();
@@ -1465,7 +1617,7 @@ void ClientProtocolV1::ready() {
   // message may in queue between last _try_send and connection ready
   // write event may already notify and we need to force scheduler again
   connection->write_lock.lock();
-  connection->can_write = AsyncConnection::WriteStatus::CANWRITE;
+  can_write = WriteStatus::CANWRITE;
   if (connection->is_queued()) {
     connection->center->dispatch_event_external(connection->write_handler);
   }
@@ -1586,8 +1738,7 @@ void ServerProtocolV1::handle_client_banner(char *buffer, int r) {
 void ServerProtocolV1::wait_connect_message() {
   ldout(cct, 20) << __func__ << " BEGIN" << dendl;
 
-  READ(sizeof(connection->connect_msg),
-       &ServerProtocolV1::handle_connect_message_1);
+  READ(sizeof(connect_msg), &ServerProtocolV1::handle_connect_message_1);
 
   ldout(cct, 20) << __func__ << " END" << dendl;
 }
@@ -1767,7 +1918,7 @@ void ServerProtocolV1::handle_connect_message_2() {
     ServerProtocolV1 *exproto =
         dynamic_cast<ServerProtocolV1 *>(existing->protocol.get());
 
-    if (existing->replacing) {
+    if (exproto->replacing) {
       ldout(cct, 1) << __func__
                     << " existing racing replace happened while replacing."
                     << " existing_state="
@@ -1915,7 +2066,7 @@ void ServerProtocolV1::handle_connect_message_2() {
     replace();
     return;
   }  // existing
-  else if (!connection->replacing && connect_msg.connect_seq > 0) {
+  else if (!replacing && connect_msg.connect_seq > 0) {
     // we reset, and they are opening a new session
     ldout(cct, 0) << __func__ << " accept we reset (peer sent cseq "
                   << connect_msg.connect_seq << "), sending RESETSESSION"
@@ -1982,7 +2133,7 @@ void ServerProtocolV1::replace() {
     existing->_stop();
     existing->dispatch_queue->queue_reset(existing.get());
   } else {
-    assert(connection->can_write == AsyncConnection::WriteStatus::NOWRITE);
+    assert(can_write == WriteStatus::NOWRITE);
     existing->write_lock.lock();
 
     // reset the in_seq if this is a hard reset from peer,
@@ -2012,8 +2163,8 @@ void ServerProtocolV1::replace() {
     connection->dispatch_queue->queue_reset(connection);
     ldout(messenger->cct, 1)
         << __func__ << " stop myself to swap existing" << dendl;
-    existing->can_write = AsyncConnection::WriteStatus::REPLACING;
-    existing->replacing = true;
+    exproto->can_write = WriteStatus::REPLACING;
+    exproto->replacing = true;
     existing->state_offset = 0;
     // avoid previous thread modify event
     existing->state = AsyncConnection::STATE_NONE;
@@ -2028,7 +2179,7 @@ void ServerProtocolV1::replace() {
           {
             std::lock_guard<std::mutex> l(existing->lock);
             existing->write_lock.lock();
-            existing->requeue_sent();
+            exproto->requeue_sent();
             existing->outcoming_bl.clear();
             existing->open_write = false;
             existing->write_lock.unlock();
@@ -2108,7 +2259,7 @@ void ServerProtocolV1::open() {
   } else {
     connect_reply.tag = CEPH_MSGR_TAG_READY;
     wait_for_seq = false;
-    out_seq = connection->discard_requeued_up_to(out_seq, 0);
+    out_seq = discard_requeued_up_to(out_seq, 0);
     is_reset_from_peer = false;
     in_seq = 0;
   }
@@ -2151,7 +2302,6 @@ void ServerProtocolV1::open() {
   connection->inject_delay();
 
   connection->lock.lock();
-  bool replacing = false;
   if (r < 0) {
     ldout(cct, 1) << __func__ << " existing race replacing process for addr = "
                   << connection->peer_addr << " just fail later one(this)"
@@ -2190,7 +2340,7 @@ void ServerProtocolV1::handle_ready_connect_message_reply_write(int r) {
   // notify
   connection->dispatch_queue->queue_accept(connection);
   messenger->ms_deliver_handle_fast_accept(connection);
-  connection->once_ready = true;
+  once_ready = true;
 
   if (wait_for_seq) {
     wait_seq();
@@ -2222,7 +2372,7 @@ void ServerProtocolV1::handle_seq(char *buffer, int r) {
   uint64_t newly_acked_seq = *(uint64_t *)buffer;
   ldout(cct, 2) << __func__ << " accept get newly_acked_seq " << newly_acked_seq
                 << dendl;
-  out_seq = connection->discard_requeued_up_to(out_seq, newly_acked_seq);
+  out_seq = discard_requeued_up_to(out_seq, newly_acked_seq);
 
   ldout(cct, 20) << __func__ << " END" << dendl;
 
@@ -2247,7 +2397,7 @@ void ServerProtocolV1::ready() {
       connection->inactive_timeout_us, connection->tick_handler);
 
   connection->write_lock.lock();
-  connection->can_write = AsyncConnection::WriteStatus::CANWRITE;
+  can_write = WriteStatus::CANWRITE;
   if (connection->is_queued()) {
     connection->center->dispatch_event_external(connection->write_handler);
   }
