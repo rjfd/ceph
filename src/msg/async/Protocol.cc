@@ -9,7 +9,7 @@
 #define dout_prefix _conn_prefix(_dout)
 ostream &ProtocolV1::_conn_prefix(std::ostream *_dout) {
   return *_dout << "-- " << messenger->get_myaddr() << " >> "
-                << connection->peer_addr << " conn(" << this << " :"
+                << connection->peer_addr << " conn(" << this->connection << " :"
                 << connection->port << " s=" << state
                 << " pgs=" << peer_global_seq << " cs=" << connect_seq
                 << " l=" << connection->policy.lossy << ").";
@@ -94,34 +94,73 @@ void ProtocolV1::handle_failure(int r) {
 
   if (connection->policy.lossy && state != INITIATING) {
     ldout(cct, 1) << __func__ << " on lossy channel, failing" << dendl;
-    connection->lock.unlock();
-    connection->stop(true);
-    connection->lock.lock();
+    connection->_stop();
+    connection->dispatch_queue->queue_reset(connection);
     return;
   }
-
-  // requeue sent items
-  requeue_sent();
 
   {
     lock_guard<mutex> wl(connection->write_lock);
     can_write = WriteStatus::NOWRITE;
     is_reset_from_peer = false;
 
+    // requeue sent items
+    requeue_sent();
+
     if (!once_ready && out_q.empty() && state == INITIATING && !replacing) {
-      ldout(cct, 10)
-          << __func__ << " with nothing to send and in the half "
-          << " accept state just closed" << dendl;
+      ldout(cct, 10) << __func__ << " with nothing to send and in the half "
+                     << " accept state just closed" << dendl;
       connection->write_lock.unlock();
       connection->_stop();
       connection->dispatch_queue->queue_reset(connection);
       return;
     }
-
     replacing = false;
+
+    connection->fault();
+
+    if (connection->policy.standby && out_q.empty() &&
+        connection->state != AsyncConnection::STATE_WAIT) {
+      ldout(cct, 10) << __func__ << " with nothing to send, going to standby"
+                     << dendl;
+      connection->state = AsyncConnection::STATE_STANDBY;
+      return;
+    }
   }
 
-  connection->fault();
+  if (!(state == INITIATING && !connection->policy.server) &&
+      connection->state != AsyncConnection::STATE_WAIT) {
+    // policy maybe empty when state is in accept
+    if (connection->policy.server) {
+      ldout(cct, 0) << __func__ << " server, going to standby" << dendl;
+      connection->state = AsyncConnection::STATE_STANDBY;
+    } else {
+      ldout(cct, 0) << __func__ << " initiating reconnect" << dendl;
+      connect_seq++;
+      state = NOT_INITIATED;
+      connection->state = AsyncConnection::STATE_CONNECTING;
+    }
+    connection->backoff = utime_t();
+    connection->center->dispatch_event_external(connection->connection_handler);
+  } else {
+    if (connection->state == AsyncConnection::STATE_WAIT) {
+      connection->backoff.set_from_double(cct->_conf->ms_max_backoff);
+    } else if (connection->backoff == utime_t()) {
+      connection->backoff.set_from_double(cct->_conf->ms_initial_backoff);
+    } else {
+      connection->backoff += connection->backoff;
+      if (connection->backoff > cct->_conf->ms_max_backoff)
+        connection->backoff.set_from_double(cct->_conf->ms_max_backoff);
+    }
+
+    state = NOT_INITIATED;
+    connection->state = AsyncConnection::STATE_CONNECTING;
+    ldout(cct, 10) << __func__ << " waiting " << connection->backoff << dendl;
+    // woke up again;
+    connection->register_time_events.insert(
+        connection->center->create_time_event(
+            connection->backoff.to_nsec() / 1000, connection->wakeup_handler));
+  }
 }
 
 void ProtocolV1::abort() {
@@ -722,7 +761,9 @@ void ProtocolV1::handle_message_footer(char *buffer, int r) {
 void ProtocolV1::session_reset() {
   ldout(cct, 10) << __func__ << " started" << dendl;
   std::lock_guard<std::mutex> l(connection->write_lock);
-  if (connection->delay_state) connection->delay_state->discard();
+  if (connection->delay_state) {
+    connection->delay_state->discard();
+  }
 
   connection->dispatch_queue->discard_queue(connection->conn_id);
   discard_out_queue();
@@ -1640,6 +1681,7 @@ ServerProtocolV1::ServerProtocolV1(AsyncConnection *connection)
       wait_for_seq(false) {}
 
 void ServerProtocolV1::init() {
+  _abort = false;
   state = INITIATING;
   accept();
 }
@@ -1905,7 +1947,10 @@ void ServerProtocolV1::handle_connect_message_2() {
     existing->lock.lock();  // skip lockdep check (we are locking a second
                             // AsyncConnection here)
 
-    if (existing->state == AsyncConnection::STATE_CLOSED) {
+    ServerProtocolV1 *exproto =
+        dynamic_cast<ServerProtocolV1 *>(existing->protocol.get());
+
+    if (exproto->state == CLOSED) {
       ldout(cct, 1) << __func__ << " existing already closed." << dendl;
       existing->lock.unlock();
       existing = nullptr;
@@ -1914,9 +1959,6 @@ void ServerProtocolV1::handle_connect_message_2() {
       open();
       return;
     }
-
-    ServerProtocolV1 *exproto =
-        dynamic_cast<ServerProtocolV1 *>(existing->protocol.get());
 
     if (exproto->replacing) {
       ldout(cct, 1) << __func__
@@ -2214,8 +2256,10 @@ void ServerProtocolV1::replace() {
             if (existing->state == AsyncConnection::STATE_CLOSED) return;
             assert(existing->state == AsyncConnection::STATE_NONE);
 
-            existing->state = AsyncConnection::STATE_ACCEPTING_WAIT_CONNECT_MSG;
+            existing->state = AsyncConnection::STATE_ACCEPTING;
             exproto->state = INITIATING;
+
+            // exproto->wait_connect_message();
             existing->center->create_file_event(
                 existing->cs.fd(), EVENT_READABLE, existing->read_handler);
             connect_reply.global_seq = exproto->peer_global_seq;
