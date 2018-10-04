@@ -1,0 +1,17 @@
+<tabset *ngIf="selection?.hasSingleSelection">
+  <tab heading="Details"
+       i18n-heading>
+    <cd-table-key-value [data]="data">
+    </cd-table-key-value>
+
+    <fieldset>
+      <legend>
+        <i class="fa fa-fw fa-book"
+           aria-hidden="true"></i>
+        <ng-container i18n>How to use</ng-container>
+      </legend>
+      <ng-container i18n>To mount this NFS export, run the following command:</ng-container>
+      <pre># mount.nfs {{ data.host }}:{{ data.pseudo }} /mnt</pre>
+    </fieldset>
+  </tab>
+</tabset>

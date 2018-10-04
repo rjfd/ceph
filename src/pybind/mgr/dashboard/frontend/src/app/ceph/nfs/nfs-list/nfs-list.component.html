@@ -1,0 +1,45 @@
+<!-- <cd-view-cache [status]="viewCacheStatus.status"></cd-view-cache> -->
+
+<cd-table #table
+          [data]="images"
+          columnMode="flex"
+          [columns]="columns"
+          identifier="id"
+          forceIdentifier="true"
+          selectionType="single"
+          (updateSelection)="updateSelection($event)">
+  <div class="table-actions btn-toolbar">
+
+    <cd-table-actions class="btn-group"
+                      [permission]="permission"
+                      [selection]="selection"
+                      [tableActions]="tableActions">
+    </cd-table-actions>
+
+    <button class="btn btn-sm btn-default btn-label"
+            type="button"
+            (click)="stateAction()"
+            *ngIf="permission.update">
+      <i class="fa fa-fw fa-cog"
+         aria-hidden="true"></i>
+      <ng-container i18n>Manage service</ng-container>
+    </button>
+  </div>
+
+  <cd-nfs-details cdTableDetail
+                  [selection]="selection">
+  </cd-nfs-details>
+</cd-table>
+
+<ng-template #nfsState
+             let-value="value">
+  <cd-nfs-state [host]="value"></cd-nfs-state>
+</ng-template>
+
+<ng-template #nfsFsal
+             let-value="value">
+  <ng-container *ngIf="value==='CEPH'"
+                i18n>CephFS</ng-container>
+  <ng-container *ngIf="value==='RGW'"
+                i18n>Object Gateway</ng-container>
+</ng-template>
