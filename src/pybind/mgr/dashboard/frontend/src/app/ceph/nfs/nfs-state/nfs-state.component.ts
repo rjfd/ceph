@@ -1,4 +1,4 @@
-import { Component, Input, OnInit } from '@angular/core';
+import { Component, Input, OnChanges } from '@angular/core';
 
 import { NfsStateService } from '../../../shared/services/nfs-state.service';
 
@@ -7,7 +7,7 @@ import { NfsStateService } from '../../../shared/services/nfs-state.service';
   templateUrl: './nfs-state.component.html',
   styleUrls: ['./nfs-state.component.scss']
 })
-export class NfsStateComponent implements OnInit {
+export class NfsStateComponent implements OnChanges {
   @Input()
   host;
 
@@ -15,7 +15,7 @@ export class NfsStateComponent implements OnInit {
 
   constructor(private nfsStateService: NfsStateService) {}
 
-  ngOnInit() {
+  ngOnChanges() {
     this.nfsStateService.subscribe(this.host, (state: string) => {
       this.state = state;
     });

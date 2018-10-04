@@ -1,0 +1,65 @@
+<cd-modal #modal
+          [modalRef]="modalRef">
+  <ng-container class="modal-title"
+                i18n>Manage NFS service</ng-container>
+  <ng-container class="modal-content">
+    <table class="table table-hover table-no-background">
+      <thead>
+        <tr>
+          <th i18n>Host</th>
+          <th i18n>State</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr *ngIf="!hosts">
+          <td colspan="3">
+            <i class="fa fa-spinner fa-spin fa-fw"></i>
+            <ng-container i18n>Loading...</ng-container>
+          </td>
+        </tr>
+        <tr *ngFor="let host of hosts | keyvalue">
+          <td>{{ host.key }}</td>
+          <td>
+            <cd-nfs-state [host]="host.key"></cd-nfs-state>
+
+            <span *ngIf="host.value.message"
+                  class="text-muted">
+              <br>
+              {{ host.value.message }}
+            </span>
+
+            <span *ngFor="let message of host.value.messages"
+                  class="text-muted">
+              <br>
+              {{ message }}
+            </span>
+          </td>
+
+          <td align="center">
+            <button class="btn btn-default btn-sm btn-label"
+                    *ngIf="host.value.state === 'INACTIVE' || host.value.state === 'STARTING'"
+                    (click)="start(host.key)"
+                    [disabled]="host.value.state === 'STARTING'">
+              <i class="fa fa-fw fa-play"></i>
+              <ng-container i18n>Start</ng-container>
+            </button>
+            <button class="btn btn-default btn-sm btn-label"
+                    *ngIf="host.value.state === 'ACTIVE' || host.value.state === 'STOPPING'"
+                    (click)="stop(host.key)"
+                    [disabled]="host.value.state === 'STOPPING'">
+              <i class="fa fa-fw fa-stop icon-danger"></i>
+              <ng-container i18n>Stop</ng-container>
+            </button>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="modal-footer">
+      <button class="btn btn-link btn-sm"
+              (click)="close()"
+              i18n>Close</button>
+    </div>
+  </ng-container>
+</cd-modal>
