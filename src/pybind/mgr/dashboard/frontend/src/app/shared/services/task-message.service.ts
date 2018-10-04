@@ -82,7 +82,8 @@ export class TaskMessageService {
       this.i18n('Deleting'),
       this.i18n('delete'),
       this.i18n('Deleted')
-    )
+    ),
+    copy: new TaskMessageOperation(this.i18n('Copying'), this.i18n('copy'), this.i18n('Copied'))
   };
 
   rbd = {
@@ -175,15 +176,11 @@ export class TaskMessageService {
         })
       })
     ),
-    'rbd/copy': new TaskMessage(
-      new TaskMessageOperation(this.i18n('Copying'), this.i18n('copy'), this.i18n('Copied')),
-      this.rbd.destination,
-      (metadata) => ({
-        '17': this.i18n('Name is already used by {{rbd_name}}.', {
-          rbd_name: this.rbd.destination(metadata)
-        })
+    'rbd/copy': new TaskMessage(this.commonOperations.copy, this.rbd.destination, (metadata) => ({
+      '17': this.i18n('Name is already used by {{rbd_name}}.', {
+        rbd_name: this.rbd.destination(metadata)
       })
-    ),
+    })),
     'rbd/flatten': new TaskMessage(
       new TaskMessageOperation(
         this.i18n('Flattening'),
@@ -293,6 +290,32 @@ export class TaskMessageService {
       this.commonOperations.delete,
       this.rbd_mirroring.pool_peer,
       (metadata) => ({})
+    ),
+    'nfs/create': new TaskMessage(this.commonOperations.create, this.nfs, (metadata) => ({
+      // '17': `Name is already used by ${this.nfs(metadata)}.`
+    })),
+    'nfs/edit': new TaskMessage(this.commonOperations.update, this.nfs, (metadata) => ({
+      // '17': `Name is already used by ${this.nfs(metadata)}.`
+    })),
+    'nfs/delete': new TaskMessage(this.commonOperations.delete, this.nfs, (metadata) => ({
+      // '39': `${this.nfs(metadata)} contains snapshots.`
+    })),
+    'nfs/copy': new TaskMessage(this.commonOperations.copy, this.nfs, (metadata) => ({
+      // '17': `Name is already used by ${this.rbd.destination(metadata)}.`
+    })),
+    'nfs/host/start': new TaskMessage(
+      new TaskMessageOperation(this.i18n('Starting'), this.i18n('start'), this.i18n('Started')),
+      (metadata) => `${metadata.host_name}`,
+      (metadata) => ({
+        // '39': `${this.nfs(metadata)} contains snapshots.`
+      })
+    ),
+    'nfs/host/stop': new TaskMessage(
+      new TaskMessageOperation(this.i18n('Stopping'), this.i18n('stop'), this.i18n('Stopped')),
+      (metadata) => `${metadata.host_name}`,
+      (metadata) => ({
+        // '39': `${this.nfs(metadata)} contains snapshots.`
+      })
     )
   };
 
@@ -304,6 +327,10 @@ export class TaskMessageService {
 
   ecp(metadata) {
     return this.i18n(`erasure code profile '{{name}}'`, { name: metadata.name });
+  }
+
+  nfs(metadata) {
+    return this.i18n(`NFS {{nfs_id}}`, { nfs_id: `'${metadata.host_name}:${metadata.export_id}'` });
   }
 
   _getTaskTitle(task: Task) {

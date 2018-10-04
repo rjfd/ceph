@@ -249,6 +249,27 @@ const routes: Routes = [
       }
     ]
   },
+  // NFS
+  {
+    path: 'nfs',
+    canActivate: [AuthGuardService],
+    canActivateChild: [AuthGuardService],
+    data: { breadcrumbs: 'NFS' },
+    children: [
+      { path: '', component: NfsListComponent },
+      { path: 'add', component: NfsFormComponent, data: { breadcrumbs: 'Add' } },
+      {
+        path: 'edit/:host/:exportId',
+        component: NfsFormComponent,
+        data: { breadcrumbs: 'Edit' }
+      },
+      {
+        path: 'copy/:host/:exportId',
+        component: NfsFormComponent,
+        data: { breadcrumbs: 'Copy' }
+      }
+    ]
+  },
   // System
   { path: 'login', component: LoginComponent },
   { path: 'logout', children: [] },
