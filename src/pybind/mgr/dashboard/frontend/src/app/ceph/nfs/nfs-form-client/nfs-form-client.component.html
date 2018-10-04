@@ -1,0 +1,102 @@
+<div class="form-group">
+  <label class="col-sm-3 control-label"
+         i18n>Clients</label>
+
+  <div class="col-sm-9"
+       [formGroup]="form"
+       #formDir="ngForm">
+    <span *ngIf="form.get('clientBlocks').value.length === 0"
+          class="form-control no-border text-muted">
+      <span class="text-muted"
+            i18n>Any client can access</span>
+    </span>
+
+    <div *ngFor="let item of form.get('clientBlocks').value; let index = index; trackBy: trackByFn">
+      <div class="panel panel-default"
+           [formGroupName]="index">
+        <div class="panel-heading">
+          <h3 class="panel-title">{{ (index + 1) | ordinal }}
+            <span class="pull-right clickable"
+                  (click)="removeClientBlock(index)"
+                  tooltip="Remove">&times;</span>
+          </h3>
+        </div>
+
+        <div class="panel-body">
+          <!-- Clients -->
+          <div class="form-group"
+               [ngClass]="{ 'has-error': showError(index, 'clients', formDir) }">
+            <label i18n
+                   class="col-sm-3 control-label"
+                   for="clients">Clients</label>
+            <div class="col-sm-9">
+              <input type="text"
+                     class="form-control"
+                     name="clients"
+                     id="clients"
+                     formControlName="clients"
+                     placeholder="192.168.0.10, 192.168.1.0/8">
+              <span class="help-block">
+                <span *ngIf="showError(index, 'clients', formDir, 'required')"
+                      i18n>Required field</span>
+
+                <span *ngIf="showError(index, 'clients', formDir, 'stringArray')">
+                  <ng-container i18n>Must contain one or more comma-separated values</ng-container>
+                  <br>
+                  <ng-container i18n>For example:</ng-container> 192.168.0.10, 192.168.1.0/8
+                </span>
+              </span>
+            </div>
+          </div>
+
+          <!-- Access Type-->
+          <div class="form-group">
+            <label i18n
+                   class="col-sm-3 control-label"
+                   for="accessType">Access Type</label>
+            <div class="col-sm-9">
+              <select class="form-control"
+                      name="accessType"
+                      id="accessType"
+                      formControlName="accessType">
+                <option value="">{{ getNoAccessTypeDescr() }}</option>
+                <option *ngFor="let accessType of nfsAccessType"
+                        [value]="accessType.value">{{ accessType.value }}</option>
+              </select>
+              <span class="help-block"
+                    *ngIf="getValue(index, 'accessType')">
+                {{ getAccessTypeHelp(index) }}
+              </span>
+            </div>
+          </div>
+
+          <!-- Squash -->
+          <div class="form-group">
+            <label i18n
+                   class="col-sm-3 control-label"
+                   for="squash">Squash</label>
+            <div class="col-sm-9">
+              <select class="form-control"
+                      name="squash"
+                      id="squash"
+                      formControlName="squash">
+                <option value="">{{ getNoSquashDescr() }}</option>
+                <option *ngFor="let squash of nfsSquash"
+                        [value]="squash">{{ squash }}</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <span class="form-control no-border">
+      <button class="btn btn-default btn-label pull-right"
+              (click)="addClientBlock()">
+        <i class="fa fa-fw fa-plus"></i>
+        <ng-container i18n>Add clients</ng-container>
+      </button>
+    </span>
+    <hr>
+  </div>
+</div>

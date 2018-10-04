@@ -11,6 +11,7 @@ import { EncodeUriPipe } from './encode-uri.pipe';
 import { FilterPipe } from './filter.pipe';
 import { HealthColorPipe } from './health-color.pipe';
 import { ListPipe } from './list.pipe';
+import { OrdinalPipe } from './ordinal.pipe';
 import { RelativeDatePipe } from './relative-date.pipe';
 import { RoundPipe } from './round.pipe';
 
@@ -28,7 +29,8 @@ import { RoundPipe } from './round.pipe';
     CdDatePipe,
     EmptyPipe,
     EncodeUriPipe,
-    RoundPipe
+    RoundPipe,
+    OrdinalPipe
   ],
   exports: [
     DimlessBinaryPipe,
@@ -42,7 +44,8 @@ import { RoundPipe } from './round.pipe';
     CdDatePipe,
     EmptyPipe,
     EncodeUriPipe,
-    RoundPipe
+    RoundPipe,
+    OrdinalPipe
   ],
   providers: [
     DatePipe,
@@ -54,7 +57,8 @@ import { RoundPipe } from './round.pipe';
     ListPipe,
     CdDatePipe,
     EmptyPipe,
-    EncodeUriPipe
+    EncodeUriPipe,
+    OrdinalPipe
   ]
 })
 export class PipesModule {}
