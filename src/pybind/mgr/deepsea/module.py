@@ -259,10 +259,10 @@ class DeepSeaOrchestrator(MgrModule, orchestrator.Orchestrator):
                 self.log.error(msg)
                 raise RequestException(msg, resp.status_code)
         except requests.exceptions.ConnectionError as ex:
-            self.log.error(str(ex))
+            self.log.exception(str(ex))
             raise RequestException(str(ex))
         except requests.exceptions.InvalidURL as ex:
-            self.log.error(str(ex))
+            self.log.exception(str(ex))
             raise RequestException(str(ex))
 
 
