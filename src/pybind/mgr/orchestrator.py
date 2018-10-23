@@ -326,7 +326,7 @@ class ServiceDescription(object):
     stateful or stateless.
 
     This is not about health or performance monitoring of services: it's
-    about letting the orchestrator tell Ceph whether and where a 
+    about letting the orchestrator tell Ceph whether and where a
     service is scheduled in the cluster.  When an orchestrator tells
     Ceph "it's running on node123", that's not a promise that the process
     is literally up this second, it's a description of where the orchestrator

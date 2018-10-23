@@ -35,6 +35,13 @@ class OrchestratorCli(MgrModule):
             "perm": "rw"
         },
         {
+            'cmd': "orchestrator service rm "
+                   "name=svc_type,type=CephString ",
+                   "desc": "Remove a service of any type",
+            "perm": "rw"
+        },
+
+        {
             'cmd': "orchestrator set backend "
                    "name=module,type=CephString,req=true",
             "desc": "Select orchestrator module backend",
@@ -122,6 +129,13 @@ class OrchestratorCli(MgrModule):
         svc_type = cmd['svc_type']
         svc_id = cmd['svc_id']
 
+        if svc_type == "nfs":
+            comp = self._oremote("describe_service", svc_type, svc_id)
+            self._wait([comp])
+            if comp.get_result():
+                return 0, "nfs server runnning on container: {}".format(comp.get_result()), ""
+            return 0, "No nfs server container is running", ""
+
         # XXX this is kind of confusing for people because in the orchestrator
         # context the service ID for MDS is the filesystem ID, not the daemon ID
 
@@ -192,8 +206,26 @@ class OrchestratorCli(MgrModule):
             self._wait([completion])
 
             return 0, "", "Success."
+
+        elif svc_type == "nfs":
+            completion = self._oremote(
+                    "add_stateless_service",
+                    svc_type, None)
+            self._wait([completion])
+            return 0, "", "Success"
         else:
             raise NotImplementedError(svc_type)
+
+    def _service_remove(self, cmd):
+        svc_type = cmd['svc_type']
+        completion = self._oremote(
+            "remove_stateless_service",
+            svc_type,
+            None)
+        if completion:
+            self._wait([completion])
+
+        return 0, "", "Success"
 
     def _set_backend(self, cmd):
         """
@@ -279,6 +311,8 @@ class OrchestratorCli(MgrModule):
             return self._service_status(cmd)
         elif cmd['prefix'] == "orchestrator service add":
             return self._service_add(cmd)
+        elif cmd['prefix'] == "orchestrator service rm":
+            return self._service_remove(cmd)
         elif cmd['prefix'] == "orchestrator set backend":
             return self._set_backend(cmd)
         elif cmd['prefix'] == "orchestrator status":
