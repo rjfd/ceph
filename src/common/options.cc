@@ -924,6 +924,16 @@ std::vector<Option> get_global_options() {
     .set_default(100_M)
     .set_description(""),
 
+    Option("ms_msgr2_sign_messages", Option::TYPE_BOOL, Option::LEVEL_ADVANCED)
+    .set_default(true)
+    .set_description("Sign msgr2 frames' payload")
+    .add_see_also("ms_msgr2_encrypt_messages"),
+
+    Option("ms_msgr2_encrypt_messages", Option::TYPE_BOOL, Option::LEVEL_ADVANCED)
+    .set_default(false)
+    .set_description("Encrypt msgr2 frames' payload")
+    .add_see_also("ms_msgr2_sign_messages"),
+
     Option("ms_bind_ipv4", Option::TYPE_BOOL, Option::LEVEL_ADVANCED)
     .set_default(true)
     .set_description("Bind servers to IPV4 address(es)")
