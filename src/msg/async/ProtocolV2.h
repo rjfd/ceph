@@ -110,7 +110,8 @@ private:
   bool keepalive;
 
   ostream &_conn_prefix(std::ostream *_dout);
-  inline void run_continuation(Ct<ProtocolV2> *continuation);
+  void run_continuation(Ct<ProtocolV2> *continuation);
+  void calc_signature(const char *in, uint32_t length, char *out);
 
   Ct<ProtocolV2> *read(CONTINUATION_PARAM(next, ProtocolV2, char *, int),
                        int len, char *buffer = nullptr);
@@ -199,6 +200,11 @@ public:
   virtual void write_event() override;
   virtual bool is_queued() override;
 
+  void sign_payload(bufferlist &payload);
+  void verify_signature(char *payload, uint32_t length);
+  void encrypt_payload(bufferlist &payload);
+  void decrypt_payload(char *payload, uint32_t &length);
+
 private:
   // Client Protocol
   CONTINUATION_DECL(ProtocolV2, start_client_banner_exchange);
@@ -242,13 +248,6 @@ private:
   Ct<ProtocolV2> *send_server_ident();
   Ct<ProtocolV2> *send_reconnect_ok();
   Ct<ProtocolV2> *server_ready();
-
-public:
-  template <class T, typename... Args>
-  friend struct SignedEncryptedFrame;
-
-  // TODO: REMOVE THIS
-  void log(const std::string message, uint64_t val, uint64_t val2);
 };
 
 #endif /* _MSG_ASYNC_PROTOCOL_V2_ */
