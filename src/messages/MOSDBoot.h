@@ -17,6 +17,7 @@
 
 #include "messages/PaxosServiceMessage.h"
 
+#include "include/ceph_features.h"
 #include "include/types.h"
 #include "osd/osd_types.h"
 
@@ -24,8 +25,8 @@ class MOSDBoot : public MessageInstance<MOSDBoot, PaxosServiceMessage> {
 public:
   friend factory;
 private:
-  static constexpr int HEAD_VERSION = 6;
-  static constexpr int COMPAT_VERSION = 6;
+  static constexpr int HEAD_VERSION = 7;
+  static constexpr int COMPAT_VERSION = 7;
 
  public:
   OSDSuperblock sb;
@@ -65,8 +66,22 @@ public:
   }
   
   void encode_payload(uint64_t features) override {
+    header.version = HEAD_VERSION;
+    header.compat_version = COMPAT_VERSION;
     using ceph::encode;
     paxos_encode();
+    if (!HAVE_FEATURE(features, SERVER_NAUTILUS)) {
+      header.version = 6;
+      header.compat_version = 6;
+      encode(sb, payload);
+      hb_back_addrs.legacy_addr().encode(payload, features);
+      cluster_addrs.legacy_addr().encode(payload, features);
+      encode(boot_epoch, payload);
+      hb_front_addrs.legacy_addr().encode(payload, features);
+      encode(metadata, payload);
+      encode(osd_features, payload);
+      return;
+    }
     encode(sb, payload);
     encode(hb_back_addrs, payload, features);
     encode(cluster_addrs, payload, features);
