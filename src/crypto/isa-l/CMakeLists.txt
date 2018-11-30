@@ -35,4 +35,4 @@ set_target_properties(ceph_crypto_isal PROPERTIES
   VERSION 1.0.0
   SOVERSION 1
   INSTALL_RPATH "")
-install(TARGETS ceph_crypto_isal DESTINATION ${isal_crypto_plugin_dir})
+install(TARGETS ceph_crypto_isal DESTINATION ${crypto_plugin_dir})
