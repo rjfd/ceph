@@ -242,6 +242,11 @@ class OrchestratorCli(MgrModule):
             self._wait([completion])
 
             return HandleCommandResult()
+        elif svc_type == "mon":
+            node_name = cmd['svc_arg']
+            completion = self._oremote("add_mon", node_name)
+            self._wait([completion])
+            return HandleCommandResult()
         else:
             raise NotImplementedError(svc_type)
 
@@ -249,7 +254,10 @@ class OrchestratorCli(MgrModule):
         svc_type = cmd['svc_type']
         svc_id = cmd['svc_id']
 
-        completion = self._oremote("remove_stateless_service", svc_type, svc_id)
+        if svc_type == "mon":
+            completion = self._oremote("remove_mon", svc_id)
+        else:
+            completion = self._oremote("remove_stateless_service", svc_type, svc_id)
         self._wait([completion])
         return HandleCommandResult()
 
