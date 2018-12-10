@@ -314,7 +314,7 @@ class OrchestratorCli(MgrModule):
             return HandleCommandResult(stdout="Backend: {0}\nAvailable: {1}{2}".format(
                                            self._select_orchestrator(),
                                            avail,
-                                           " ({0})".format(why) if not avail else ""
+                                           " ({0})".format(why) if why else ""
                                        ))
 
     def handle_command(self, inbuf, cmd):
