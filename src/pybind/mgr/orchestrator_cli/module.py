@@ -232,6 +232,16 @@ class OrchestratorCli(MgrModule):
             self._wait([completion])
 
             return HandleCommandResult()
+        elif svc_type == "nfs":
+            place = cmd['svc_arg']
+
+            spec = orchestrator.StatelessServiceSpec()
+            spec.placement.label = place
+
+            completion = self._oremote("add_stateless_service", svc_type, spec)
+            self._wait([completion])
+
+            return HandleCommandResult()
         else:
             raise NotImplementedError(svc_type)
 
