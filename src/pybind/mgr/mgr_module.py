@@ -2,11 +2,15 @@
 import ceph_module  # noqa
 
 import logging
+import importlib
 import json
 import six
 import threading
 from collections import defaultdict, namedtuple
+import os
+import pkgutil
 import rados
+import sys
 import time
 
 PG_STATES = [
@@ -290,6 +294,68 @@ class CRUSHMap(ceph_module.BasePyCRUSH):
         return dict(result)
 
 
+class CLICommand(object):
+    COMMAND_LIST = []
+
+    def __init__(self, prefix, args=None, desc=None, perm=None):
+        self.prefix = prefix
+        self.args = args if args else ""
+        self.args_dict = {}
+        self.desc = desc if desc else ""
+        self.perm = perm if perm else "rw"
+        self.func = None
+        self._parse_args()
+
+    def _parse_args(self):
+        if not self.args:
+            return
+        args = self.args.split(" ")
+        for arg in args:
+            arg_desc = arg.strip().split(",")
+            arg_d = {}
+            for kv in arg_desc:
+                k, v = kv.split("=")
+                if k != "name":
+                    arg_d[k] = v
+                else:
+                    self.args_dict[v] = arg_d
+
+    def __call__(self, func):
+        self.func = func
+        setattr(self.func, '_cli_cmd_', True)
+        self.COMMAND_LIST.append(self)
+        return self.func
+
+    def call(self, mgr, cmd_dict, inbuf):
+        kwargs = {}
+        for a, d in self.args_dict.items():
+            if 'req' in d and d['req'] == "false" and a not in cmd_dict:
+                continue
+            kwargs[a.replace("-", "_")] = cmd_dict[a]
+        if inbuf:
+            kwargs['inbuf'] = inbuf
+        return self.func(mgr, **kwargs)
+
+    @classmethod
+    def register_commands(cls, mgr_module):
+        for cmd in cls.COMMAND_LIST:
+            mgr_module.COMMANDS.append({
+                'cmd': '{} {}'.format(cmd.prefix, cmd.args),
+                'desc': cmd.desc,
+                'perm': cmd.perm
+            })
+
+
+class CLIReadCommand(CLICommand):
+    def __init__(self, prefix, args=None, desc=None):
+        super(CLIReadCommand, self).__init__(prefix, args, desc, "r")
+
+
+class CLIWriteCommand(CLICommand):
+    def __init__(self, prefix, args=None, desc=None):
+        super(CLIWriteCommand, self).__init__(prefix, args, desc, "w")
+
+
 class MgrStandbyModule(ceph_module.BaseMgrStandbyModule):
     """
     Standby modules only implement a serve and shutdown method, they
@@ -440,6 +506,32 @@ class MgrModule(ceph_module.BaseMgrModule):
     def log(self):
         return self._logger
 
+    @classmethod
+    def _traverse_module_packages(cls, root, package):
+        mods = [mod for _, mod, _ in pkgutil.iter_modules([root])]
+        for mod_name in mods:
+            try:
+                mod = importlib.import_module('.{}'.format(mod_name),
+                                              package=package)
+                if '__package__' in mod.__dict__:
+                    if mod.__dict__['__package__'] != package:
+                        cls._traverse_module_packages("{}/{}".format(root, mod_name),
+                                                      mod.__dict__['__package__'])
+            except Exception:
+                pass  # ignore import exceptions
+
+    @classmethod
+    def _register_commands(cls, module_name):
+        """
+        This method scans all module packages and imports each package module
+        to trigger the initialization of CLICommand decorators.
+        """
+        mgr_dir = os.path.dirname(os.path.realpath(__file__))
+        mgr_module_dir = "{}/{}".format(mgr_dir, module_name)
+        cls._traverse_module_packages(mgr_module_dir, module_name)
+
+        CLICommand.register_commands(cls)
+
     def cluster_log(self, channel, priority, message):
         """
         :param channel: The log channel. This can be 'cluster', 'audit', ...
@@ -512,7 +604,7 @@ class MgrModule(ceph_module.BaseMgrModule):
         """
         Called by the plugin to fetch named cluster-wide objects from ceph-mgr.
 
-        :param str data_name: Valid things to fetch are osd_crush_map_text, 
+        :param str data_name: Valid things to fetch are osd_crush_map_text,
                 osd_map, osd_map_tree, osd_map_crush, config, mon_map, fs_map,
                 osd_metadata, pg_summary, io_rate, pg_dump, df, osd_stats,
                 health, mon_status, devices, device <devid>.
@@ -524,7 +616,7 @@ class MgrModule(ceph_module.BaseMgrModule):
         return self._ceph_get(data_name)
 
     def _stattype_to_str(self, stattype):
-        
+
         typeonly = stattype & self.PERFCOUNTER_TYPE_MASK
         if typeonly == 0:
             return 'gauge'
@@ -535,7 +627,7 @@ class MgrModule(ceph_module.BaseMgrModule):
             return 'counter'
         if typeonly == self.PERFCOUNTER_HISTOGRAM:
             return 'histogram'
-        
+
         return ''
 
     def _perfvalue_to_value(self, stattype, value):
@@ -549,7 +641,7 @@ class MgrModule(ceph_module.BaseMgrModule):
         if unit == self.NONE:
             return "/s"
         elif unit == self.BYTES:
-            return "B/s"  
+            return "B/s"
 
     def to_pretty_iec(self, n):
         for bits, suffix in [(60, 'Ei'), (50, 'Pi'), (40, 'Ti'), (30, 'Gi'),
@@ -762,6 +854,12 @@ class MgrModule(ceph_module.BaseMgrModule):
         """
         self._ceph_set_health_checks(checks)
 
+    def _handle_command(self, inbuf, cmd):
+        for cli_cmd in CLICommand.COMMAND_LIST:
+            if cmd['prefix'] == cli_cmd.prefix:
+                return cli_cmd.call(self, cmd, inbuf)
+        return self.handle_command(inbuf, cmd)
+
     def handle_command(self, inbuf, cmd):
         """
         Called by ceph-mgr to request the plugin to handle one
@@ -797,7 +895,7 @@ class MgrModule(ceph_module.BaseMgrModule):
 
     def _validate_module_option(self, key):
         """
-        Helper: don't allow get/set config callers to 
+        Helper: don't allow get/set config callers to
         access config options that they didn't declare
         in their schema.
         """

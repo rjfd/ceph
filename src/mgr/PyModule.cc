@@ -474,6 +474,17 @@ int PyModule::walk_dict_list(
 
 int PyModule::load_commands()
 {
+  PyObject *pRegCmd = PyObject_CallMethod(pClass,
+      const_cast<char*>("_register_commands"), const_cast<char*>("(s)"),
+      module_name.c_str());
+  if (pRegCmd != nullptr) {
+    Py_DECREF(pRegCmd);
+  } else {
+    derr << "Exception calling _register_commands on " << get_name()
+         << dendl;
+    derr << handle_pyerror() << dendl;
+  }
+
   int r = walk_dict_list("COMMANDS", [this](PyObject *pCommand) -> int {
     ModuleCommand command;
 
