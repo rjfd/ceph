@@ -243,7 +243,7 @@ class CephService(object):
                 for _, pg_amount in osd_pg_statuses.items():
                     total_pgs += pg_amount
 
-            pgs_per_osd = total_pgs / total_osds
+            pgs_per_osd = int(total_pgs / total_osds)
 
         return {
             'statuses': pg_summary['all'],
