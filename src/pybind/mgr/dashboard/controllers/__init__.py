@@ -152,20 +152,14 @@ def Proxy(path=None):
 def load_controllers():
     # setting sys.path properly when not running under the mgr
     controllers_dir = os.path.dirname(os.path.realpath(__file__))
-    dashboard_dir = os.path.dirname(controllers_dir)
-    mgr_dir = os.path.dirname(dashboard_dir)
     logger.debug("LC: controllers_dir=%s", controllers_dir)
-    logger.debug("LC: dashboard_dir=%s", dashboard_dir)
-    logger.debug("LC: mgr_dir=%s", mgr_dir)
-    if mgr_dir not in sys.path:
-        sys.path.append(mgr_dir)
 
     controllers = []
     mods = [mod for _, mod, _ in pkgutil.iter_modules([controllers_dir])]
     logger.debug("LC: mods=%s", mods)
     for mod_name in mods:
-        mod = importlib.import_module('.controllers.{}'.format(mod_name),
-                                      package='dashboard')
+        mod = importlib.import_module('.{}'.format(mod_name),
+                                      package=__package__)
         for _, cls in mod.__dict__.items():
             # Controllers MUST be derived from the class BaseController.
             if inspect.isclass(cls) and issubclass(cls, BaseController) and \
