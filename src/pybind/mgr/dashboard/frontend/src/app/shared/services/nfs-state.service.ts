@@ -47,12 +47,12 @@ export class NfsStateService {
     });
   }
 
-  getState(host, hostname, executing_tasks) {
+  getState(service, hostname, executing_tasks) {
     const startingHosts = {};
     const stoppingHosts = {};
 
     executing_tasks.forEach((element) => {
-      if (element.name === 'nfs/host/stop') {
+      if (element.name === 'nfs/service/stop') {
         stoppingHosts[element.metadata.host_name] = true;
       } else {
         startingHosts[element.metadata.host_name] = true;
@@ -65,13 +65,13 @@ export class NfsStateService {
     if (stoppingHosts[hostname]) {
       return 'STOPPING';
     }
-    if (host.active === true) {
+    if (service.active === true) {
       return 'ACTIVE';
     }
-    if (host.active === false) {
+    if (service.active === false) {
       return 'INACTIVE';
     }
-    if (host.active === undefined) {
+    if (service.active === undefined) {
       return 'LOADING';
     }
     return 'UNKNOWN';
@@ -84,22 +84,22 @@ export class NfsStateService {
         )
       : [];
 
-    this.nfsService.status().subscribe((hosts: any) => {
-      _.forIn(hosts, (host, hostname) => {
-        host.state = this.getState(host, hostname, executing_tasks);
+    this.nfsService.services().subscribe((services: any) => {
+      services.forEach(service => {
+        service.state = this.getState(service, service.hostname, executing_tasks);
         const exports = {};
-        if (host.state === 'ACTIVE') {
-          host.exports.forEach((exportItem) => {
-            exports[exportItem.export_id] = {
-              state: exportItem.active ? 'ACTIVE' : 'INACTIVE',
-              message: exportItem.message
-            };
-          });
-        }
-        host.exports = exports;
+        // if (host.state === 'ACTIVE') {
+        //   host.exports.forEach((exportItem) => {
+        //     exports[exportItem.export_id] = {
+        //       state: exportItem.active ? 'ACTIVE' : 'INACTIVE',
+        //       message: exportItem.message
+        //     };
+        //   });
+        // }
+        service.exports = exports;
       });
 
-      this.stateDataSource.next(hosts);
+      this.stateDataSource.next(services);
     });
   }
 

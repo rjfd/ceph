@@ -5,19 +5,19 @@
   <div class="col-sm-9"
        [formGroup]="form"
        #formDir="ngForm">
-    <span *ngIf="form.get('clientBlocks').value.length === 0"
+    <span *ngIf="form.get('clients').value.length === 0"
           class="form-control no-border text-muted">
       <span class="text-muted"
             i18n>Any client can access</span>
     </span>
 
-    <div *ngFor="let item of form.get('clientBlocks').value; let index = index; trackBy: trackByFn">
+    <div *ngFor="let item of form.get('clients').value; let index = index; trackBy: trackByFn">
       <div class="panel panel-default"
            [formGroupName]="index">
         <div class="panel-heading">
           <h3 class="panel-title">{{ (index + 1) | ordinal }}
             <span class="pull-right clickable"
-                  (click)="removeClientBlock(index)"
+                  (click)="removeClient(index)"
                   tooltip="Remove">&times;</span>
           </h3>
         </div>
@@ -92,7 +92,7 @@
 
     <span class="form-control no-border">
       <button class="btn btn-default btn-label pull-right"
-              (click)="addClientBlock()">
+              (click)="addClient()">
         <i class="fa fa-fw fa-plus"></i>
         <ng-container i18n>Add clients</ng-container>
       </button>

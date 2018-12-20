@@ -158,7 +158,8 @@ export class NfsListComponent implements OnInit, OnDestroy {
 
   prepareResponse(resp: any): any[] {
     let result = [];
-    resp.value.forEach((nfs) => {
+    resp.forEach((nfs) => {
+      nfs.id = `${nfs.host}:${nfs.exportId}`;
       nfs.state = 'LOADING';
       result = result.concat(nfs);
     });

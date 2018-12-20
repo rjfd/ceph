@@ -52,7 +52,7 @@ class TaskMessage {
   providedIn: ServicesModule
 })
 export class TaskMessageService {
-  constructor(private i18n: I18n) {}
+  constructor(private i18n: I18n) { }
 
   defaultMessage = new TaskMessage(
     new TaskMessageOperation(this.i18n('Executing'), this.i18n('execute'), this.i18n('Executed')),
@@ -297,9 +297,11 @@ export class TaskMessageService {
     'nfs/edit': new TaskMessage(this.commonOperations.update, this.nfs, (metadata) => ({
       // '17': `Name is already used by ${this.nfs(metadata)}.`
     })),
-    'nfs/delete': new TaskMessage(this.commonOperations.delete, this.nfs, (metadata) => ({
-      // '39': `${this.nfs(metadata)} contains snapshots.`
-    })),
+    'nfs/delete': new TaskMessage(this.commonOperations.delete,
+      (metadata) => this.nfs(metadata),
+      (metadata) => ({
+        // '39': `${this.nfs(metadata)} contains snapshots.`
+      })),
     'nfs/copy': new TaskMessage(this.commonOperations.copy, this.nfs, (metadata) => ({
       // '17': `Name is already used by ${this.rbd.destination(metadata)}.`
     })),

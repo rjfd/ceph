@@ -43,20 +43,20 @@ export class NfsFormClientComponent {
     return this.i18n('-- Select what kind of user id squashing is performed --');
   }
 
-  addClientBlock() {
-    const clientBlocks = this.form.get('clientBlocks') as FormArray;
+  addClient() {
+    const clients = this.form.get('clients') as FormArray;
 
     const fg = new CdFormGroup({
       clients: new FormControl('', {
         validators: [
           Validators.required,
-          CdValidators.custom('stringArray', (clients) => {
-            if (!clients) {
+          CdValidators.custom('stringArray', (cls) => {
+            if (!cls) {
               return true;
             }
 
             try {
-              const value = '"' + clients.replace(/,/g, '","') + '"';
+              const value = '"' + cls.replace(/,/g, '","') + '"';
               return JSON.parse('[' + value + ']').every((item) => {
                 return item.trim() !== '';
               });
@@ -70,22 +70,22 @@ export class NfsFormClientComponent {
       squash: new FormControl('')
     });
 
-    clientBlocks.push(fg);
+    clients.push(fg);
   }
 
-  removeClientBlock(index) {
-    const clientBlocks = this.form.get('clientBlocks') as FormArray;
-    clientBlocks.removeAt(index);
+  removeClient(index) {
+    const clients = this.form.get('clients') as FormArray;
+    clients.removeAt(index);
   }
 
   showError(index, control, formDir, x) {
-    return (<any>this.form.controls.clientBlocks).controls[index].showError(control, formDir, x);
+    return (<any>this.form.controls.clients).controls[index].showError(control, formDir, x);
   }
 
   getValue(index, control) {
-    const clientBlocks = this.form.get('clientBlocks') as FormArray;
-    const clientBlock = clientBlocks.at(index) as CdFormGroup;
-    return clientBlock.getValue(control);
+    const clients = this.form.get('clients') as FormArray;
+    const client = clients.at(index) as CdFormGroup;
+    return client.getValue(control);
   }
 
   trackByFn(index, item) {

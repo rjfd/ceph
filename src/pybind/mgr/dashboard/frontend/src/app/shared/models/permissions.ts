@@ -44,6 +44,6 @@ export class Permissions {
     this.log = new Permission(serverPermissions['log']);
     this.user = new Permission(serverPermissions['user']);
     this.grafana = new Permission(serverPermissions['grafana']);
-    this.nfs = new Permission(serverPermissions['nfs']);
+    this.nfs = new Permission(serverPermissions['nfs-ganesha']);
   }
 }

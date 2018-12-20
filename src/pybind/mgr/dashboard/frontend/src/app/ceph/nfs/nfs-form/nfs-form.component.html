@@ -7,7 +7,7 @@
     <div class="panel panel-default">
       <div class="panel-heading">
         <h3 class="panel-title"
-            i18n>NFS export {{ id }}</h3>
+            i18n>NFS export {{ host }}:{{ exportId }}</h3>
       </div>
 
       <div class="panel-body">
@@ -340,7 +340,7 @@
           </div>
         </div>
 
-        <!-- Client Blocks -->
+        <!-- Clients -->
         <cd-nfs-form-client [form]="nfsForm">
         </cd-nfs-form-client>
 

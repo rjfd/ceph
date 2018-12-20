@@ -27,7 +27,9 @@ export class NfsFormComponent implements OnInit {
   nfsForm: CdFormGroup;
   isEdit = false;
   isCopy = false;
-  id = undefined;
+
+  hostname = null;
+  exportId = null;
 
   isNewDirectory = false;
   isNewBucket = false;
@@ -61,7 +63,7 @@ export class NfsFormComponent implements OnInit {
   }
 
   ngOnInit() {
-    const promises: any[] = [this.nfsService.hosts(), this.nfsService.fsals()];
+    const promises: any[] = [this.nfsService.services(), this.nfsService.fsals()];
 
     if (this.router.url.startsWith('/nfs/edit')) {
       this.isEdit = true;
@@ -71,10 +73,10 @@ export class NfsFormComponent implements OnInit {
 
     if (this.isEdit || this.isCopy) {
       this.route.params.subscribe((params: { host: string; exportId: string }) => {
-        this.id = `${params.host}:${params.exportId}`;
-
         const host = decodeURIComponent(params.host);
         const exportId = decodeURIComponent(params.exportId);
+        this.hostname = host;
+        this.exportId = exportId;
         promises.push(this.nfsService.get(host, exportId));
 
         this.getData(promises);
@@ -101,8 +103,6 @@ export class NfsFormComponent implements OnInit {
 
   createForm() {
     this.nfsForm = new CdFormGroup({
-      id: new FormControl(''),
-      exportId: new FormControl(''),
       host: new FormControl('', {
         validators: [Validators.required]
       }),
@@ -162,7 +162,7 @@ export class NfsFormComponent implements OnInit {
           })
         ]
       }),
-      clientBlocks: this.formBuilder.array([])
+      clients: this.formBuilder.array([])
     });
   }
 
@@ -188,15 +188,15 @@ export class NfsFormComponent implements OnInit {
     res.transportUDP = res.transports.indexOf('UDP') !== -1;
     delete res.transports;
 
-    res.clientBlocks.forEach((clientBlock) => {
-      let clientsStr = '';
-      clientBlock.clients.forEach((client) => {
-        clientsStr += client + ', ';
+    res.clients.forEach((client) => {
+      let addressStr = '';
+      client.addresses.forEach((address) => {
+        addressStr += address + ', ';
       });
-      if (clientsStr.length >= 2) {
-        clientsStr = clientsStr.substring(0, clientsStr.length - 2);
+      if (addressStr.length >= 2) {
+        addressStr = addressStr.substring(0, addressStr.length - 2);
       }
-      clientBlock.clients = clientsStr;
+      client.addresses = addressStr;
     });
 
     // if (this.$state.current.name === 'cephNfs-clone') {
@@ -207,8 +207,11 @@ export class NfsFormComponent implements OnInit {
     this.nfsForm.patchValue(res);
   }
 
-  resolveHosts(res) {
-    this.allHosts = res;
+  resolveHosts(services) {
+    this.allHosts = [];
+    services.forEach(service => {
+      this.allHosts.push(service.hostname);
+    });
 
     if (
       _.isArray(this.allHosts) &&
@@ -391,11 +394,6 @@ export class NfsFormComponent implements OnInit {
   _buildRequest() {
     const requestModel: any = _.cloneDeep(this.nfsForm.value);
 
-    if (!requestModel.id) {
-      delete requestModel.id;
-      delete requestModel.exportId;
-    }
-
     if (requestModel.fsal === 'RGW') {
       requestModel.path = requestModel.bucket;
     }
@@ -429,13 +427,13 @@ export class NfsFormComponent implements OnInit {
       requestModel.transports.push('UDP');
     }
 
-    requestModel.clientBlocks.forEach((clientBlock) => {
-      if (_.isString(clientBlock.clients)) {
-        let clients = clientBlock.clients.replace(/\s/g, '');
-        clients = '"' + clients.replace(/,/g, '","') + '"';
-        clientBlock.clients = JSON.parse('[' + clients + ']');
+    requestModel.clients.forEach((clients) => {
+      if (_.isString(clients.addresses)) {
+        let addresses = clients.addresses.replace(/\s/g, '');
+        addresses = '"' + addresses.replace(/,/g, '","') + '"';
+        clients.addresses = JSON.parse('[' + addresses + ']');
       } else {
-        clientBlock.clients = [];
+        clients.addresses = [];
       }
     });
 

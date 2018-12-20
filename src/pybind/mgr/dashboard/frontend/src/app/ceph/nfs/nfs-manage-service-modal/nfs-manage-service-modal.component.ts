@@ -26,9 +26,12 @@ export class NfsManageServiceModalComponent implements OnInit {
   ) {}
 
   ngOnInit() {
-    this.nfsService.hosts().subscribe((res: any) => {
+    this.nfsService.services().subscribe((services: any) => {
       this.hosts = {};
-      this.hostnames = res;
+      this.hostnames = [];
+      services.forEach(service => {
+        this.hostnames.push(service.hostname);
+      });
       this._updateStates();
     });
   }
