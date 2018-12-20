@@ -174,13 +174,15 @@ class OrchestratorCli(MgrModule):
         else:
             lines = []
             for s in services:
-                lines.append("{0}.{1} {2} {3} {4} {5}".format(
+                lines.append("{0}.{1} {2} {3} {4} {5} {6} {7}".format(
                     s.service_type,
                     s.daemon_name,
                     s.nodename,
                     s.container_id,
                     s.version,
-                    s.rados_config_location))
+                    s.rados_config_location,
+                    "running" if s.status == 1 else "stopped" if s.status == 0 else "error",
+                    s.status_desc if s.status == -1 else ""))
 
             return HandleCommandResult(stdout="\n".join(lines))
 
