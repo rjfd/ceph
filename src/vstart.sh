@@ -1146,6 +1146,21 @@ do_rgw_create_users()
         --display-name tenanteduser \
         --email tenanteduser@example.com -c $conf_fn > /dev/null
 
+    if $with_mgr_dashboard; then
+      $CEPH_BIN/radosgw-admin user create \
+          --uid=dashboard-admin \
+          --display-name="Dashboard Admin" \
+          --system -c $conf_fn > /dev/null
+      RGW_AK=`$CEPH_BIN/radosgw-admin user info --uid=dashboard-admin -c $conf_fn \
+                  | grep access_key \
+                  | sed 's/.*access_key": "\(.*\)".*/\1/g'`
+      RGW_SK=`$CEPH_BIN/radosgw-admin user info --uid=dashboard-admin -c $conf_fn \
+                  | grep secret_key \
+                  | sed 's/.*secret_key": "\(.*\)".*/\1/g'`
+      ceph_adm tell mgr dashboard set-rgw-api-access-key $RGW_AK
+      ceph_adm tell mgr dashboard set-rgw-api-secret-key $RGW_SK
+    fi
+
     # Create Swift user
     echo "setting up user tester"
     $CEPH_BIN/radosgw-admin user create -c $conf_fn --subuser=test:tester --display-name=Tester-Subuser --key-type=swift --secret=testing --access=full > /dev/null
