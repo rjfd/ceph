@@ -3,7 +3,8 @@ overrides:
     conf:
       client:
         debug rgw: 20
-        debug ms: 1
+        debug ms: 5
+        debug objecter: 10
       osd:
         osd_max_omap_entries_per_request: 10
 tasks:
