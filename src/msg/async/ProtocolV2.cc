@@ -96,6 +96,17 @@ const int SIGNATURE_BLOCK_SIZE = CEPH_CRYPTO_HMACSHA256_DIGESTSIZE;
 
 #define READB(L, B, C) read(CONTINUATION(C), L, B)
 
+#define INTERCEPT(S) { \
+if(messenger->interceptor) { \
+  auto a = messenger->interceptor->intercept(connection, (S)); \
+  if (a == Interceptor::ACTION::FAIL) { \
+    return _fault(); \
+  } else if (a == Interceptor::ACTION::STOP) { \
+    stop(); \
+    connection->dispatch_queue->queue_reset(connection); \
+    return nullptr; \
+  }}}
+
 static void alloc_aligned_buffer(bufferlist &data, unsigned len, unsigned off) {
   // create a buffer to read into that matches the data alignment
   unsigned alloc_len = 0;
@@ -1249,6 +1260,8 @@ CtPtr ProtocolV2::_banner_exchange(CtPtr callback) {
   encode((uint16_t)banner_payload.length(), bl, 0);
   bl.claim_append(banner_payload);
 
+  INTERCEPT(state == CONNECTING ? 3 : 4);
+
   return WRITE(bl, "banner", _wait_for_peer_banner);
 }
 
@@ -1294,6 +1307,9 @@ CtPtr ProtocolV2::_handle_peer_banner(char *buffer, int r) {
                                      // temp_buffer size as well
 
   next_payload_len = payload_len;
+
+  INTERCEPT(state == CONNECTING ? 5 : 6);
+
   return READ(next_payload_len, _handle_peer_banner_payload);
 }
 
@@ -1353,6 +1369,9 @@ CtPtr ProtocolV2::_handle_peer_banner_payload(char *buffer, int r) {
   }
 
   HelloFrame hello(this, messenger->get_mytype(), connection->target_addr);
+
+  INTERCEPT(state == CONNECTING ? 7 : 8);
+
   return WRITE(hello.get_buffer(), "hello frame", read_frame);
 }
 
@@ -2076,6 +2095,9 @@ CtPtr ProtocolV2::handle_message_ack(char *payload, uint32_t length) {
 
 CtPtr ProtocolV2::start_client_banner_exchange() {
   ldout(cct, 20) << __func__ << dendl;
+
+  INTERCEPT(1);
+
   state = CONNECTING;
 
   global_seq = messenger->get_global_seq();
@@ -2115,6 +2137,9 @@ CtPtr ProtocolV2::send_auth_request(std::vector<uint32_t> &allowed_methods) {
     connection->dispatch_queue->queue_reset(connection);
     return nullptr;
   }
+
+  INTERCEPT(9);
+
   AuthRequestFrame frame(auth_meta->auth_method, preferred_modes, bl);
   return WRITE(frame.get_buffer(), "auth request", read_frame);
 }
@@ -2267,8 +2292,9 @@ CtPtr ProtocolV2::send_client_ident() {
 		<< (connection->policy.features_required | msgr2_required)
                 << " flags=" << flags << std::dec << dendl;
 
-  bufferlist &bl = client_ident.get_buffer();
-  return WRITE(bl, "client ident", read_frame);
+  INTERCEPT(11);
+
+  return WRITE(client_ident.get_buffer(), "client ident", read_frame);
 }
 
 CtPtr ProtocolV2::send_reconnect() {
@@ -2422,6 +2448,9 @@ CtPtr ProtocolV2::handle_server_ident(char *payload, uint32_t length) {
 
 CtPtr ProtocolV2::start_server_banner_exchange() {
   ldout(cct, 20) << __func__ << dendl;
+
+  INTERCEPT(2);
+
   state = ACCEPTING;
 
   return _banner_exchange(CONTINUATION(post_server_banner_exchange));
@@ -2502,6 +2531,8 @@ CtPtr ProtocolV2::_handle_auth_request(bufferlist& auth_payload, bool more)
     return _fault();
   }
   if (r == 1) {
+    INTERCEPT(10);
+
     AuthDoneFrame auth_done(connection->peer_global_id, auth_meta->con_mode,
 			    reply);
     return WRITE(auth_done.get_buffer(), "auth done", read_frame);
@@ -3037,8 +3068,9 @@ CtPtr ProtocolV2::send_server_ident() {
   connection->dispatch_queue->queue_accept(connection);
   messenger->ms_deliver_handle_fast_accept(connection);
 
-  bufferlist &bl = server_ident.get_buffer();
-  return WRITE(bl, "server ident", server_ready);
+  INTERCEPT(12);
+
+  return WRITE(server_ident.get_buffer(), "server ident", server_ready);
 }
 
 CtPtr ProtocolV2::server_ready() {
