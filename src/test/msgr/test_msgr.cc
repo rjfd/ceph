@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <time.h>
+#include <set>
 #include "common/Mutex.h"
 #include "common/Cond.h"
 #include "common/ceph_argparse.h"
@@ -224,6 +225,174 @@ class FakeDispatcher : public Dispatcher {
 };
 
 typedef FakeDispatcher::Session Session;
+
+struct TestInterceptor : public Interceptor {
+
+  bool step_waiting = false;
+  bool waiting = true;
+  uint32_t current_step;
+  std::map<uint32_t, std::optional<ACTION>> decisions;
+  std::set<uint32_t> breakpoints;
+
+  void breakpoint(uint32_t step) {
+    breakpoints.insert(step);
+  }
+
+  void remove_bp(uint32_t step) {
+    breakpoints.erase(step);
+  }
+
+  void wait(uint32_t step) {
+    std::unique_lock<std::mutex> l(lock);
+    while(current_step != step) {
+      step_waiting = true;
+      cond_var.wait(l);
+    }
+    step_waiting = false;
+  }
+
+  ACTION wait_for_decision(uint32_t step, std::unique_lock<std::mutex> &l) {
+    if (decisions[step]) {
+      return *(decisions[step]);
+    }
+    waiting = true;
+    while(waiting) {
+      cond_var.wait(l);
+    }
+    return *(decisions[step]);
+  }
+
+  void proceed(uint32_t step, ACTION decision) {
+    std::unique_lock<std::mutex> l(lock);
+    decisions[step] = decision;
+    if (waiting) {
+      waiting = false;
+      cond_var.notify_one();
+    }
+  }
+
+  ACTION intercept(Connection *conn, uint32_t step) override {
+    lderr(g_ceph_context) << __func__ << " conn(" << conn 
+                          << ") intercept called on step=" << step << dendl;
+
+    {
+      std::unique_lock<std::mutex> l(lock);
+      current_step = step;  
+      if (step_waiting) {
+        cond_var.notify_one();
+      }
+    }
+
+    std::unique_lock<std::mutex> l(lock);
+    ACTION decision = ACTION::CONTINUE;
+    if (breakpoints.find(step) != breakpoints.end()) {
+      lderr(g_ceph_context) << __func__ << " conn(" << conn 
+                            << ") pausing on step=" << step << dendl;
+      decision = wait_for_decision(step, l);
+    } else {
+      if (decisions[step]) {
+        decision = *(decisions[step]);
+      }
+    }
+    lderr(g_ceph_context) << __func__ << " conn(" << conn 
+                          << ") resuming step=" << step << " with decision=" 
+                          << decision << dendl;
+    decisions[step].reset();
+    return decision;
+  }
+
+};
+
+void state_fail_test(Messenger *server_msgr, Messenger *client_msgr,
+                     uint32_t step) {
+  FakeDispatcher cli_dispatcher(false), srv_dispatcher(true);
+
+  entity_addr_t bind_addr;
+  bind_addr.parse("v2:127.0.0.1");
+  server_msgr->bind(bind_addr);
+  server_msgr->add_dispatcher_head(&srv_dispatcher);
+  server_msgr->start();
+
+  client_msgr->add_dispatcher_head(&cli_dispatcher);
+  client_msgr->start();
+
+  TestInterceptor *cli_interceptor = static_cast<TestInterceptor *>(client_msgr->interceptor);
+
+  cli_interceptor->breakpoint(step);
+
+  MPing *m = new MPing();
+  ConnectionRef conn = client_msgr->connect_to(server_msgr->get_mytype(),
+					       server_msgr->get_myaddrs());
+  {
+    ASSERT_EQ(conn->send_message(m), 0);
+
+    cli_interceptor->wait(step);
+    cli_interceptor->remove_bp(step);
+    cli_interceptor->proceed(step, Interceptor::ACTION::FAIL);
+
+    Mutex::Locker l(cli_dispatcher.lock);
+    while (!cli_dispatcher.got_new)
+      cli_dispatcher.cond.Wait(cli_dispatcher.lock);
+    cli_dispatcher.got_new = false;
+  }
+  ASSERT_TRUE(conn->is_connected());
+  ASSERT_EQ(1u, static_cast<Session*>(conn->get_priv().get())->get_count());
+  ASSERT_TRUE(conn->peer_is_osd());
+
+  {
+    Mutex::Locker l(srv_dispatcher.lock);
+    while (!srv_dispatcher.got_new)
+      srv_dispatcher.cond.Wait(srv_dispatcher.lock);
+    srv_dispatcher.got_new = false;
+  }
+
+  conn->mark_down();
+  ASSERT_FALSE(conn->is_connected());
+
+  client_msgr->shutdown();
+  client_msgr->wait();
+  server_msgr->shutdown();
+  server_msgr->wait();
+}
+
+TEST_P(MessengerTest, BannerHelloStateFailTest) {
+  for (auto s : {3, 5, 7}) {
+    if (s != 3) {
+      SetUp();
+    }
+    TestInterceptor *cli_interceptor = new TestInterceptor();
+    TestInterceptor *srv_interceptor = new TestInterceptor();
+    client_msgr->interceptor = cli_interceptor;
+    server_msgr->interceptor = srv_interceptor;
+    state_fail_test(server_msgr, client_msgr, 3);
+    delete cli_interceptor;
+    delete srv_interceptor;
+    if (s != 7) {
+      TearDown();
+    }
+  }
+}
+
+TEST_P(MessengerTest, IdentStateFailTest) {
+  g_ceph_context->_conf.set_val("ms_inject_step_failure", "9");
+
+  // StateFailDispatcher state_dispatcher;
+  // state_dispatcher.transitions.insert(std::make_pair(9, "10"));
+  // state_fail_test(server_msgr, client_msgr, state_dispatcher);
+  // Messenger::Policy p = Messenger::Policy::stateful_server(0);
+  // server_msgr->set_policy(entity_name_t::TYPE_CLIENT, p);
+}
+
+// TEST_P(MessengerTest, IdentStateFailTest2) {
+//   g_ceph_context->_conf.set_val("ms_inject_step_failure", "9");
+
+//   Messenger::Policy p = Messenger::Policy::stateful_server(0);
+//   server_msgr->set_policy(entity_name_t::TYPE_CLIENT, p);
+
+//   StateFailDispatcher state_dispatcher;
+//   state_dispatcher.transitions.insert(std::make_pair(9, "10"));
+//   state_fail_test(server_msgr, client_msgr, state_dispatcher);
+// }
 
 TEST_P(MessengerTest, SimpleTest) {
   FakeDispatcher cli_dispatcher(false), srv_dispatcher(true);
