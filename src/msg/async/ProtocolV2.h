@@ -97,6 +97,7 @@ private:
 
   uint32_t next_payload_len;
   Tag next_tag;
+  uint64_t tag_mask;
   ceph_msg_header2 current_header;
   utime_t backoff;  // backoff time
   utime_t recv_stamp;
@@ -114,12 +115,14 @@ private:
 
   Ct<ProtocolV2> *read(CONTINUATION_PARAM(next, ProtocolV2, char *, int),
                        int len, char *buffer = nullptr);
-  template <class F>
+  template <class F, typename... T>
+  Ct<ProtocolV2> *write_frame(const std::string &desc,
+                              CONTINUATION_PARAM(next, ProtocolV2, T...),
+                              F &frame, T... args);
+  template <typename... T>
   Ct<ProtocolV2> *write(const std::string &desc,
-                        CONTINUATION_PARAM(next, ProtocolV2), F &frame);
-  Ct<ProtocolV2> *write(const std::string &desc,
-                        CONTINUATION_PARAM(next, ProtocolV2),
-                        bufferlist &buffer);
+                        CONTINUATION_PARAM(next, ProtocolV2, T...),
+                        bufferlist &buffer, T... args);
 
   void requeue_sent();
   uint64_t discard_requeued_up_to(uint64_t out_seq, uint64_t seq);
@@ -144,7 +147,7 @@ private:
   Ct<ProtocolV2> *_handle_peer_banner_payload(char *buffer, int r);
   Ct<ProtocolV2> *handle_hello(char *payload, uint32_t length);
 
-  CONTINUATION_DECL(ProtocolV2, read_frame);
+  CONTINUATION_DECL(ProtocolV2, read_frame, uint64_t);
   READ_HANDLER_CONTINUATION_DECL(ProtocolV2, handle_read_frame_length_and_tag);
   READ_HANDLER_CONTINUATION_DECL(ProtocolV2, handle_frame_payload);
   READ_HANDLER_CONTINUATION_DECL(ProtocolV2, handle_message_header);
@@ -157,7 +160,7 @@ private:
   READ_HANDLER_CONTINUATION_DECL(ProtocolV2, handle_message_data);
   READ_HANDLER_CONTINUATION_DECL(ProtocolV2, handle_message_extra_bytes);
 
-  Ct<ProtocolV2> *read_frame();
+  Ct<ProtocolV2> *read_frame(uint64_t tag_mask);
   Ct<ProtocolV2> *handle_read_frame_length_and_tag(char *buffer, int r);
   Ct<ProtocolV2> *handle_frame_payload(char *buffer, int r);
 
