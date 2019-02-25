@@ -1,4 +1,5 @@
-
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
 #include "common/async/completion.h"
 #include "rgw_dmclock_async_scheduler.h"
 #include "rgw_dmclock_scheduler.h"
@@ -41,12 +42,11 @@ int AsyncScheduler::schedule_request_impl(const client_id& client,
                                           const Time& time, const Cost& cost,
                                           optional_yield yield_ctx)
 {
-    ceph_assert(yield_ctx);
-
+#ifdef HAVE_BOOST_CONTEXT
+  if (yield_ctx) {
     auto &yield = yield_ctx.get_yield_context();
     boost::system::error_code ec;
     async_request(client, params, time, cost, yield[ec]);
-
     if (ec){
       if (ec == boost::system::errc::resource_unavailable_try_again)
         return -EAGAIN;
@@ -54,7 +54,9 @@ int AsyncScheduler::schedule_request_impl(const client_id& client,
         return -ec.value();
     }
 
-    return 0;
+  }
+#endif
+  return 0;
 }
 
 void AsyncScheduler::request_complete()
