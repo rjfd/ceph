@@ -49,5 +49,6 @@ else:
     import sys
     import mock
     sys.modules['ceph_module'] = mock.Mock()
+    sys.modules['rbd'] = mock.Mock()
 
     mgr = mock.Mock()

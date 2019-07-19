@@ -10,8 +10,6 @@ import os
 import pkgutil
 import sys
 
-from typing import Type
-
 if sys.version_info >= (3, 0):
     from urllib.parse import unquote  # pylint: disable=no-name-in-module,import-error
 else:
@@ -131,47 +129,6 @@ class ControllerDoc(object):
             'tag_descr': self.tag_descr
         }
         return cls
-
-
-class RequestModel(object):
-    class Validator(object):
-        pass
-
-    class RegexValidator(Validator):
-        pass
-
-    class LengthValidator(Validator):
-        def __init__(self, max: int = None, min: int = None):
-            self._max = max
-            self._min = min
-
-    class Attribute(object):
-        def __init__(self, description: str = None, validator: RequestModel.Validator = None,
-                     required: bool = True):
-            self._description = description
-            self._validator = validator
-            self._required = required
-
-
-    class String(Attribute):
-        pass
-
-    class ListOf(Attribute):
-        def __init__(self, attribute: RequestModel.Attribute, description: str = None,
-                     validator: RequestModel.Validator = None, required: bool = True):
-            super(RequestModel.ListOf, self).__init__(description, validator, required)
-            self._attribute = attribute
-
-    class ModelAttribute(Attribute):
-        def __init__(self, model_class: Type[RequestModel], description: str = None,
-                     validator: RequestModel.Validator = None, required: bool = True):
-            super(RequestModel.ModelAttribute, self).__init__(description, validator, required)
-            self._model_class = model_class
-
-    @classmethod
-    def asAttribute(cls, description: str = None, validator: RequestModel.Validator = None,
-                    required: bool = True) -> RequestModel.Attribute:
-        return RequestModel.ModelAttribute(cls, description, validator, required)
 
 
 class Controller(object):

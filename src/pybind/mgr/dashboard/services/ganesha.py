@@ -393,7 +393,7 @@ class FSal(object):
 
 
 class RGWFSal(FSal):
-    def __init__(self, name, rgw_user_id, access_key, secret_key):
+    def __init__(self, name, rgw_user_id, access_key=None, secret_key=None):
         super(RGWFSal, self).__init__(name)
         self.rgw_user_id = rgw_user_id
         self.access_key = access_key

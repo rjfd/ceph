@@ -7,7 +7,7 @@ import cherrypy
 import cephfs
 
 from . import ApiController, RESTController, UiApiController, BaseController, \
-              Endpoint, Task, ReadPermission, ControllerDoc, EndpointDoc, RequestModel as Model
+              Endpoint, Task, ReadPermission, ControllerDoc, EndpointDoc
 from .. import logger
 from ..security import Scope
 from ..services.cephfs import CephFS
@@ -72,38 +72,6 @@ CREATE_EXPORT_SCHEMA = {
                        'Trigger reload of NFS-Ganesha daemons configuration',
                        True)
 }
-
-Val = Model.Validator
-
-class FsalModel(Model):
-    name = Model.String(
-        description="Export path",
-        validator=(Val.Length(max=64), Val.Regex()))
-
-    # ...
-
-
-class ExportModel(Model):
-    path = Model.String(
-        description="Export path",
-        validator=Model.RegexValidator())
-
-    cluster_id = Model.String(
-        description="Cluster identifier")
-
-    daemons = Model.ListOf(
-        Model.String(validator=Model.LengthValidator(64)),
-        description="List of NFS Ganesha daemons identifiers")
-
-    pseudo = Model.String(
-        description="Pseudo FS path",
-        validator=Model.RegexValidator(),
-        required=False)
-
-    # ....
-
-    fsal = FsalModel.asAttribute(
-        description="FSAL configuration")
 
 
 # pylint: disable=not-callable
