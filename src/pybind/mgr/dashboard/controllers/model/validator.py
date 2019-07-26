@@ -22,7 +22,8 @@ class IPAddress(Validator):
 
 
 class Enum(Validator):
-    pass
+    def __init__(self, *args):
+        self._options = args
 
 
 class Gt(Validator):

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from typing import Type
 
-from . import RequestModel
+from . import BodyModel
 from .validator import Validator
 
 
@@ -21,6 +21,10 @@ class Int(Attribute):
     pass
 
 
+class Bool(Attribute):
+    pass
+
+
 class ListOf(Attribute):
     def __init__(self, attribute: Attribute, description: str = None,
                  validator: Validator = None, required: bool = True):
@@ -29,7 +33,7 @@ class ListOf(Attribute):
 
 
 class Model(Attribute):
-    def __init__(self, model_class: Type[RequestModel], description: str = None,
+    def __init__(self, model_class: Type[BodyModel], description: str = None,
                  validator: Validator = None, required: bool = True):
         super(Model, self).__init__(description, validator, required)
         self._model_class = model_class

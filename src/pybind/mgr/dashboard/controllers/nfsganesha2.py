@@ -6,14 +6,14 @@ from functools import partial
 
 
 from . import ApiController, RESTController, Task, ControllerDoc
-from .model import RequestModel as Model, validator as Val, attribute as Attr
+from .model import BodyModel, validator as Val, attribute as Attr
 from ..security import Scope
 from ..services.exception import serialize_dashboard_exception
 from ..services.ganesha import Ganesha, GaneshaConf, NFSException, Export, CephFSFSal, RGWFSal, \
                                Client
 
 
-class FsalModel(Model):
+class FsalModel(BodyModel):
     name = Attr.String(
         description="Export path",
         validator=Val.Enum("CEPH", "RGW"))
@@ -39,9 +39,9 @@ class FsalModel(Model):
         required=False)
 
 
-class ClientModel(Model):
+class ClientModel(BodyModel):
     addresses = Attr.ListOf(
-        Model.String(validator=(Val.NotEmpty(), Val.Length(64), Val.IPAddress())),
+        Attr.String(validator=(Val.NotEmpty(), Val.Length(64), Val.IPAddress())),
         description="List of IP addresses")
 
     access_type = Attr.String(
@@ -53,7 +53,7 @@ class ClientModel(Model):
         validator=Val.Enum("no_root_squash", "root_id_squash", "root_squash", "all_squash"))
 
 
-class CreateExportModel(Model):
+class CreateExportModel(BodyModel):
     path = Attr.String(
         description="Export path",
         validator=Val.Regex())
@@ -62,7 +62,7 @@ class CreateExportModel(Model):
         description="Cluster identifier")
 
     daemons = Attr.ListOf(
-        Model.String(validator=Val.Length(64)),
+        Attr.String(validator=Val.Length(64)),
         description="List of NFS Ganesha daemons identifiers")
 
     pseudo = Attr.String(
@@ -87,11 +87,11 @@ class CreateExportModel(Model):
         validator=Val.Length(64))
 
     protocols = Attr.ListOf(
-        Model.Int(validator=Val.Enum(3, 4)),
+        Attr.Int(validator=Val.Enum(3, 4)),
         description="List of protocol types")
 
     transports = Attr.ListOf(
-        Model.String(validator=Val.Enum("TCP", "UDP")),
+        Attr.String(validator=Val.Enum("TCP", "UDP")),
         description="List of transport types")
 
     fsal = Attr.Model(FsalModel,
@@ -185,9 +185,9 @@ def NfsTask(name, metadata, wait_for):
     return composed_decorator
 
 
-@ApiController('/nfs-ganesha/export', Scope.NFS_GANESHA)
-@ControllerDoc(group="NFS-Ganesha")
-class NFSGaneshaExports(RESTController):
+# @ApiController('/nfs-ganesha/export', Scope.NFS_GANESHA)
+# @ControllerDoc(group="NFS-Ganesha")
+class NFSGaneshaExports(object):
     RESOURCE_ID = "cluster_id/export_id"
 
     def list(self) -> Sequence[ExportModel]:
